@@ -42,15 +42,29 @@ export const getSessionWorkspace = (slug) => {
   return dir;
 };
 
+// Fallback memakai tag TERPISAH supaya tag utama (SANDBOX_IMAGE) tidak pernah berisi ubuntu polos.
+// Dengan begitu, build image asli akan dicoba lagi pada pemanggilan berikutnya.
+const FALLBACK_IMAGE = `${SANDBOX_IMAGE.replace(/:[^/:]*$/, '')}:fallback`;
+
+let imagePromise = null; // dedupe: banyak request bersamaan → hanya 1 build
+
 /**
- * Memastikan image sandbox tersedia. Kalau belum ada, build dari Dockerfile.sandbox.
- * Fallback terakhir: pull ubuntu:24.04 (guard ensureAntigravity akan memasang agy
- * di dalam container saat pertama dibuat).
+ * Memastikan image sandbox tersedia dan mengembalikan NAMA image yang harus dipakai.
+ * Urutan: image utama sudah ada → pakai; belum → build dari server/Dockerfile.sandbox;
+ * build gagal → fallback ubuntu:24.04 (tag :fallback, agy dipasang saat container dibuat).
  */
-export async function ensureSandboxImage() {
+export function ensureSandboxImage() {
+  if (!imagePromise) {
+    imagePromise = buildImageIfNeeded().finally(() => { imagePromise = null; });
+  }
+  return imagePromise;
+}
+
+async function buildImageIfNeeded() {
+  const quiet = { stdio: ['pipe', 'pipe', 'pipe'] };
   try {
-    await execFileP('docker', ['image', 'inspect', SANDBOX_IMAGE], { stdio: ['pipe', 'pipe', 'pipe'] });
-    return true;
+    await execFileP('docker', ['image', 'inspect', SANDBOX_IMAGE], quiet);
+    return SANDBOX_IMAGE;
   } catch {
     console.log(`[Sandbox Auto-Build] Image '${SANDBOX_IMAGE}' belum ada, membangun dari Dockerfile.sandbox...`);
     const dockerfilePath = path.join(__dirname, 'Dockerfile.sandbox');
@@ -60,13 +74,19 @@ export async function ensureSandboxImage() {
         child.on('error', () => resolve(false));
         child.on('close', (code) => resolve(code === 0));
       });
-      if (ok) { console.log(`[Sandbox Auto-Build] ✅ Image '${SANDBOX_IMAGE}' siap.`); return true; }
-      console.error('[Sandbox Auto-Build] Build gagal, fallback ke ubuntu:24.04...');
+      if (ok) { console.log(`[Sandbox Auto-Build] ✅ Image '${SANDBOX_IMAGE}' siap.`); return SANDBOX_IMAGE; }
+      console.error(`[Sandbox Auto-Build] Build gagal, fallback ke ubuntu:24.04 (tag '${FALLBACK_IMAGE}')...`);
+    } else {
+      console.error(`[Sandbox Auto-Build] ${dockerfilePath} tidak ditemukan, fallback ke ubuntu:24.04...`);
     }
-    await execFileP('docker', ['pull', 'ubuntu:24.04'], { stdio: 'inherit' });
-    await execFileP('docker', ['tag', 'ubuntu:24.04', SANDBOX_IMAGE], { stdio: ['pipe', 'pipe', 'pipe'] });
-    console.log(`[Sandbox Auto-Build] ✅ Fallback image siap (agy dipasang saat container dibuat).`);
-    return true;
+    try {
+      await execFileP('docker', ['image', 'inspect', FALLBACK_IMAGE], quiet);
+    } catch {
+      await execFileP('docker', ['pull', 'ubuntu:24.04'], { stdio: 'inherit' });
+      await execFileP('docker', ['tag', 'ubuntu:24.04', FALLBACK_IMAGE], quiet);
+    }
+    console.log(`[Sandbox Auto-Build] ⚠️ Memakai fallback '${FALLBACK_IMAGE}' (tanpa Python/Node/git; agy dipasang saat container dibuat).`);
+    return FALLBACK_IMAGE;
   }
 }
 
@@ -76,7 +96,8 @@ export async function ensureSandboxImage() {
  */
 async function ensureAntigravity(containerName) {
   const check = `${AGY_BIN_IN_SANDBOX} --version`;
-  const install = `curl -fsSL https://antigravity.google/cli/install.sh | bash`;
+  const ensureCurl = `command -v curl >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq curl ca-certificates)`;
+  const install = `${ensureCurl} && curl -fsSL https://antigravity.google/cli/install.sh | bash`;
   const script = `if ! command -v agy >/dev/null 2>&1 && [ ! -x ${AGY_BIN_IN_SANDBOX} ]; then echo "[sandbox] menginstall antigravity..."; ${install}; fi; ${check}`;
   try {
     await execFileP('docker', ['exec', containerName, 'bash', '-c', script], { timeout: 5 * 60 * 1000 });
@@ -89,7 +110,17 @@ async function ensureAntigravity(containerName) {
  * Memastikan container sandbox untuk 1 chat aktif. Urutannya:
    sudah jalan → langsung pakai; berhenti → start; belum ada → buat baru.
  */
-export async function ensureSandbox(slug) {
+const sandboxPending = new Map(); // slug → Promise (hindari `docker run --name` ganda)
+
+export function ensureSandbox(slug) {
+  const safe = slugSafe(slug);
+  if (!sandboxPending.has(safe)) {
+    sandboxPending.set(safe, ensureSandboxOnce(safe).finally(() => sandboxPending.delete(safe)));
+  }
+  return sandboxPending.get(safe);
+}
+
+async function ensureSandboxOnce(slug) {
   const safe = slugSafe(slug);
   const containerName = getSafeContainerName(safe);
   const hostWorkspace = getSessionWorkspace(safe);
@@ -101,7 +132,7 @@ export async function ensureSandbox(slug) {
     await execFileP('docker', ['start', containerName], { stdio: ['pipe', 'pipe', 'pipe'] });
     return containerName;
   } catch {
-    await ensureSandboxImage();
+    const image = await ensureSandboxImage();
     await execFileP('docker', ['run', '-d',
       '--init',
       '--name', containerName,
@@ -112,7 +143,7 @@ export async function ensureSandbox(slug) {
       '-v', `${hostWorkspace}:${SANDBOX_HOME}`,
       '-v', `${GEMINI_DATA_DIR}:/root/.gemini`,
       '-w', SANDBOX_HOME,
-      SANDBOX_IMAGE, 'tail', '-f', '/dev/null',
+      image, 'tail', '-f', '/dev/null',
     ], { stdio: ['pipe', 'pipe', 'pipe'] });
     await ensureAntigravity(containerName);
     return containerName;

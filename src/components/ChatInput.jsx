@@ -76,7 +76,7 @@ export default function ChatInput({
         <RippleButton className="circle-btn plus" onClick={onOpenAttach} aria-label="Lampirkan">
           <Plus size={22} />
         </RippleButton>
-        {(expanded || !isNewChat) && (
+        {expanded && (
           <RippleButton className={'model-pill' + (!expanded ? ' compact' : '')} onClick={onOpenModel}>
             {modelName}
           </RippleButton>

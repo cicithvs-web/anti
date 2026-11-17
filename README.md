@@ -16,7 +16,7 @@ menyentuh server host.
                └─ /root/.gemini  ← bind: server/sandbox-data/gemini (token + riwayat)
 ```
 
-- Image sandbox dibangun otomatis dari `Dockerfile.sandbox` (ubuntu:24.04 + Python3,
+- Image sandbox dibangun otomatis dari `server/Dockerfile.sandbox` (ubuntu:24.04 + Python3,
   Node 22, build-essential, dst. + Antigravity CLI) saat pertama kali dipakai.
 - Container dibatasi `--memory 2048m --cpus 2.0 --pids-limit 512` dan dibuat ulang
   otomatis jika hilang/dihapus.
@@ -61,8 +61,12 @@ Prasyarat: `docker` terpasang dan bisa dipanggil oleh user yang menjalankan serv
 
 ```bash
 # Opsional — pre-build image (kalau tidak, otomatis dibangun saat pertama dipakai)
-docker build -f server/Dockerfile.sandbox -t antigpt-sandbox:latest .
+docker build -f server/Dockerfile.sandbox -t antigpt-sandbox:latest server/
 ```
+
+> Jika build image gagal (mis. jaringan), server memakai image fallback `antigpt-sandbox:fallback`
+> (ubuntu polos, `curl` dan agy dipasang saat container dibuat). Tag `latest` tidak pernah diisi
+> image polos, jadi build image lengkap otomatis dicoba lagi pada permintaan berikutnya.
 
 Variabel environment opsional:
 
@@ -103,5 +107,6 @@ mkdir -p server/sandbox-data && cp -a ~/.gemini server/sandbox-data/gemini
 - `server/agy.js` — logic inti agy (prompt, stream, models, quota, login) via sandbox
 - `server/sandboxManager.js` — manajemen container Docker sandbox per chat
 - `server/Dockerfile.sandbox` — definisi image sandbox (Ubuntu 24.04 + tools + Antigravity CLI)
+- `server/.dockerignore` — mengecualikan `sessions/` dan `sandbox-data/` (token OAuth) dari build context
 - `server/sessions/` — workspace per chat (`AGENT.md`, `project/`, `state.json`)
 - `server/sandbox-data/` — state agy yang persisten (token OAuth, conversations)
