@@ -61,7 +61,7 @@ Prasyarat: `docker` terpasang dan bisa dipanggil oleh user yang menjalankan serv
 
 ```bash
 # Opsional — pre-build image (kalau tidak, otomatis dibangun saat pertama dipakai)
-docker build -f Dockerfile.sandbox -t antigpt-sandbox:latest .
+docker build -f server/Dockerfile.sandbox -t antigpt-sandbox:latest .
 ```
 
 Variabel environment opsional:
@@ -102,6 +102,6 @@ mkdir -p server/sandbox-data && cp -a ~/.gemini server/sandbox-data/gemini
 - `server/server.js` — backend Express (API chat, upload, login, sandbox endpoints)
 - `server/agy.js` — logic inti agy (prompt, stream, models, quota, login) via sandbox
 - `server/sandboxManager.js` — manajemen container Docker sandbox per chat
-- `Dockerfile.sandbox` — definisi image sandbox (Ubuntu 24.04 + tools + Antigravity CLI)
+- `server/Dockerfile.sandbox` — definisi image sandbox (Ubuntu 24.04 + tools + Antigravity CLI)
 - `server/sessions/` — workspace per chat (`AGENT.md`, `project/`, `state.json`)
 - `server/sandbox-data/` — state agy yang persisten (token OAuth, conversations)
