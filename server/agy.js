@@ -84,6 +84,18 @@ export function extractResetIn(raw) {
   return m ? m[1].trim() : null;
 }
 
+const readMinutes = (name, def) => {
+  const v = process.env[name];
+  if (v === undefined || v === '') return def;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+};
+// Idle timeout: dianggap macet jika diam tanpa output selama N menit (0 = nonaktif)
+export const PROMPT_IDLE_MIN = readMinutes('AGY_PROMPT_IDLE_MIN', 10);
+// Max timeout: batas total 1 giliran eksekusi agar tidak mengunci slot antrean selamanya (0 = nonaktif)
+export const PROMPT_MAX_MIN = readMinutes('AGY_PROMPT_MAX_MIN', 60);
+const MAX_RAW_OUT = 256 * 1024; // batasi tail buffer raw_output di RAM untuk tugas berdurasi lama
+
 // ---------- agyPrompt (async, jalan di sandbox) ----------
 export function agyPrompt(slug, text, model, conversationId) {
   return new Promise(async (resolve) => {
@@ -93,7 +105,7 @@ export function agyPrompt(slug, text, model, conversationId) {
     let proc;
     try {
       proc = await spawnInSandbox(slug, [AGY_BIN_IN_SANDBOX, ...args], {
-        timeoutMs: 10 * 60 * 1000,
+        timeoutMs: PROMPT_MAX_MIN > 0 ? PROMPT_MAX_MIN * 60 * 1000 : 0,
         onTimeout: () => killAgy(slug),
       });
     } catch (e) {
@@ -101,8 +113,9 @@ export function agyPrompt(slug, text, model, conversationId) {
       return;
     }
     let out = '';
-    proc.stdout.on('data', (d) => { out += d; });
-    proc.stderr.on('data', (d) => { out += d; });
+    const appendOut = (s) => { out += s; if (out.length > MAX_RAW_OUT) out = out.slice(-MAX_RAW_OUT); };
+    proc.stdout.on('data', (d) => appendOut(d.toString()));
+    proc.stderr.on('data', (d) => appendOut(d.toString()));
     proc.on('error', (e) => resolve({ status: 'ERROR', response: String(e.message || e), error: String(e) }));
     proc.on('close', () => {
       const lim = detectLimit(out);
@@ -122,16 +135,19 @@ export function agyPromptStream(slug, text, model, conversationId, onEvent, sign
     if (model) args.push('--model', model);
     if (conversationId) args.push('--conversation', conversationId);
     let proc;
+    let timedOut = null; // 'idle' | 'max' | null
     try {
       proc = await spawnInSandbox(slug, [AGY_BIN_IN_SANDBOX, ...args], {
-        timeoutMs: 10 * 60 * 1000,
-        onTimeout: () => killAgy(slug),
+        timeoutMs: PROMPT_MAX_MIN > 0 ? PROMPT_MAX_MIN * 60 * 1000 : 0,
+        idleTimeoutMs: PROMPT_IDLE_MIN > 0 ? PROMPT_IDLE_MIN * 60 * 1000 : 0,
+        onTimeout: (reason) => { timedOut = reason || 'max'; killAgy(slug); },
       });
     } catch (e) {
       resolve({ status: 'ERROR', response: String(e.message || e), error: String(e) });
       return;
     }
     let out = '', buf = '', result = null, convId = null, usage = null, settled = false;
+    const appendOut = (s) => { out += s; if (out.length > MAX_RAW_OUT) out = out.slice(-MAX_RAW_OUT); };
     const stop = () => { try { proc.kill('SIGKILL'); } catch {} killAgy(slug); };
     if (signal) {
       if (signal.aborted) stop();
@@ -148,10 +164,10 @@ export function agyPromptStream(slug, text, model, conversationId, onEvent, sign
       try { onEvent && onEvent(ev); } catch {}
     };
     proc.stdout.on('data', (d) => {
-      const s = d.toString(); out += s; buf += s;
+      const s = d.toString(); appendOut(s); buf += s;
       let i; while ((i = buf.indexOf('\n')) >= 0) { handleLine(buf.slice(0, i)); buf = buf.slice(i + 1); }
     });
-    proc.stderr.on('data', (d) => { out += d; });
+    proc.stderr.on('data', (d) => appendOut(d.toString()));
     proc.on('error', (e) => { if (!settled) { settled = true; resolve({ status: 'ERROR', response: String(e.message || e), error: String(e) }); } });
     proc.on('close', () => {
       if (settled) return;
@@ -159,15 +175,22 @@ export function agyPromptStream(slug, text, model, conversationId, onEvent, sign
       if (buf) handleLine(buf);
       const lim = detectLimit(out);
       if (result) { resolve({ ...result, conversation_id: result.conversation_id || convId, usage: result.usage || usage, limitDetected: lim, raw_output: out }); return; }
+      if (timedOut) {
+        const msg = timedOut === 'idle'
+          ? `Tidak ada aktivitas dari AI selama ${PROMPT_IDLE_MIN} menit (kemungkinan proses macet). Kirim "lanjutkan" jika tugas belum selesai.`
+          : `Batas waktu maksimal eksekusi (${PROMPT_MAX_MIN} menit) tercapai. Kirim "lanjutkan" untuk meneruskan pekerjaan.`;
+        resolve({ status: 'ERROR', timedOut, response: msg, conversation_id: convId, error: `timeout:${timedOut}`, limitDetected: lim, raw_output: out });
+        return;
+      }
       resolve({ status: 'ERROR', response: out.replace(/\{"event"[^\n]*\n?/g, '').trim() || '(tidak ada output)', conversation_id: convId, error: 'parse', limitDetected: lim, raw_output: out });
     });
   });
 }
 
-// ---------- antrean global FIFO (MAX_PARALLEL = 2) ----------
+// ---------- antrean global FIFO (MAX_PARALLEL default 2) ----------
 // Satu antrean untuk semua chat supaya adil (siapa duluan, dia duluan).
 // Job yang dibatalkan saat masih menunggu langsung dikeluarkan dari antrean (tidak pernah dijalankan).
-export const MAX_PARALLEL = 2;
+export const MAX_PARALLEL = Math.max(1, parseInt(process.env.AGY_MAX_PARALLEL || '2', 10) || 2);
 let running = 0;
 const queue = []; // { slug, fn, resolve, signal }
 const cancelledResult = () => ({ status: 'CANCELLED', response: '', cancelled: true });

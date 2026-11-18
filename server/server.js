@@ -17,9 +17,26 @@ const jobs = await import('./jobs.js');
 const app = express();
 app.set('trust proxy', true); // supaya req.secure / req.ip benar di belakang nginx / tunnel
 app.use(express.json({ limit: '2mb' }));
+
+const MAX_UPLOAD_FILES = Math.max(1, parseInt(process.env.MAX_UPLOAD_FILES || '20', 10) || 20);
+const MAX_UPLOAD_MB = Math.max(1, parseInt(process.env.MAX_UPLOAD_MB || '100', 10) || 100);
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+const UPLOAD_TMP_DIR = path.join(__dirname, 'uploads', 'tmp');
+fs.mkdirSync(UPLOAD_TMP_DIR, { recursive: true });
+// Bersihkan sisa file upload sementara dari proses sebelumnya (mis. crash/restart saat upload berlangsung)
+try {
+  for (const name of fs.readdirSync(UPLOAD_TMP_DIR)) {
+    fs.rmSync(path.join(UPLOAD_TMP_DIR, name), { recursive: true, force: true });
+  }
+} catch {}
+
+// Pakai diskStorage (stream langsung ke disk) supaya upload besar/banyak tidak memakan RAM Node (limit PM2 1G).
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { files: 5, fileSize: 15 * 1024 * 1024 },
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOAD_TMP_DIR),
+    filename: (_req, file, cb) => cb(null, `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${safeName(file.originalname)}`),
+  }),
+  limits: { files: MAX_UPLOAD_FILES, fileSize: MAX_UPLOAD_BYTES },
 });
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -255,6 +272,27 @@ function serveChatProjectFile(req, res, { imageOnly = false, download = false } 
 app.get('/api/chats/:chatId/images/:filename(*)', (req, res) => serveChatProjectFile(req, res, { imageOnly: true }));
 app.get('/api/chats/:chatId/files/:filename(*)', (req, res) => serveChatProjectFile(req, res, { download: true }));
 
+function cleanupTempFiles(files = []) {
+  for (const file of files || []) {
+    if (file?.path) {
+      try { fs.unlinkSync(file.path); } catch {}
+    }
+  }
+}
+
+function moveFile(src, dest) {
+  try {
+    fs.renameSync(src, dest);
+  } catch (err) {
+    if (err?.code === 'EXDEV') {
+      fs.copyFileSync(src, dest);
+      fs.unlinkSync(src);
+    } else {
+      throw err;
+    }
+  }
+}
+
 function persistUploads(chatId, files = []) {
   if (!files.length) return [];
   const slug = agy.slugify(chatId || 'default');
@@ -262,11 +300,20 @@ function persistUploads(chatId, files = []) {
   // supaya agy bisa membacanya. path di prompt memakai path versi sandbox.
   const dir = path.join(agy.BASE, slug, 'project', 'uploads');
   fs.mkdirSync(dir, { recursive: true });
-  return files.map((file) => {
-    const storedName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${safeName(file.originalname)}`;
-    fs.writeFileSync(path.join(dir, storedName), file.buffer);
-    return { name: file.originalname, type: file.mimetype, size: file.size, path: `/home/AntiGPT/project/uploads/${storedName}` };
-  });
+  const saved = [];
+  try {
+    for (const file of files) {
+      const storedName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${safeName(file.originalname)}`;
+      const dest = path.join(dir, storedName);
+      if (file.path) moveFile(file.path, dest);
+      else if (file.buffer) fs.writeFileSync(dest, file.buffer);
+      saved.push({ name: file.originalname, type: file.mimetype, size: file.size, path: `/home/AntiGPT/project/uploads/${storedName}` });
+    }
+    return saved;
+  } catch (err) {
+    cleanupTempFiles(files);
+    throw err;
+  }
 }
 
 function promptWithAttachments(text, files = []) {
@@ -286,6 +333,7 @@ app.get('/api/status', (req, res) => {
     maxParallel: agy.MAX_PARALLEL,
     queued: agy.queuedCount(),
     login: agy.getLoginState(),
+    limits: { files: MAX_UPLOAD_FILES, fileSizeMb: MAX_UPLOAD_MB },
   });
 });
 
@@ -303,38 +351,49 @@ app.get('/api/models', async (req, res) => {
 
 // ---------- CHAT ----------
 // body: { chatId, title, text, model }
-app.post('/api/chat', upload.array('files', 5), async (req, res) => {
-  const { chatId, text, model } = req.body || {};
-  // validasi & cek login DULU, baru simpan upload (hindari file yatim)
-  if ((!text || !String(text).trim()) && !req.files?.length) return res.status(400).json({ ok: false, error: 'teks atau file kosong' });
-  if (!agy.whoamiEmail()) return res.json({ ok: false, needLogin: true, error: 'Belum login. Buka menu Akun → Login dengan Google.' });
-  const files = persistUploads(chatId, req.files);
+app.post('/api/chat', upload.array('files', MAX_UPLOAD_FILES), async (req, res, next) => {
+  try {
+    const { chatId, text, model } = req.body || {};
+    // validasi & cek login DULU, baru simpan upload ke folder sesi (hindari file yatim)
+    if ((!text || !String(text).trim()) && !req.files?.length) {
+      cleanupTempFiles(req.files);
+      return res.status(400).json({ ok: false, error: 'teks atau file kosong' });
+    }
+    if (!agy.whoamiEmail()) {
+      cleanupTempFiles(req.files);
+      return res.json({ ok: false, needLogin: true, error: 'Belum login. Buka menu Akun → Login dengan Google.' });
+    }
+    const files = persistUploads(chatId, req.files);
 
-  const slug = agy.slugify(chatId || 'default');
-  agy.topicDir(slug);
-  const st = agy.readState(slug);
-  if (model) st.model = model;
-  if (!st.model) st.model = agy.DEFAULT_MODEL;
-  agy.writeState(slug, st);
+    const slug = agy.slugify(chatId || 'default');
+    agy.topicDir(slug);
+    const st = agy.readState(slug);
+    if (model) st.model = model;
+    if (!st.model) st.model = agy.DEFAULT_MODEL;
+    agy.writeState(slug, st);
 
-  const started = Date.now();
-  const r = await agy.runQueued(slug, () => agy.agyPrompt(slug, promptWithAttachments(text, files), st.model, st.conversation_id));
-  const raw = r.raw_output || r.response || '';
+    const started = Date.now();
+    const r = await agy.runQueued(slug, () => agy.agyPrompt(slug, promptWithAttachments(text, files), st.model, st.conversation_id));
+    const raw = r.raw_output || r.response || '';
 
-  if (r.conversation_id) st.conversation_id = r.conversation_id;
-  if (r.usage) { st.last_usage = r.usage; st.last_model = st.model; st.last_ts = Date.now(); }
-  agy.writeState(slug, st);
+    if (r.conversation_id) st.conversation_id = r.conversation_id;
+    if (r.usage) { st.last_usage = r.usage; st.last_model = st.model; st.last_ts = Date.now(); }
+    agy.writeState(slug, st);
 
-  const lim = r.limitDetected || null;
-  res.json({
-    ok: r.status === 'SUCCESS',
-    answer: r.response || '',
-    model: st.model,
-    usage: r.usage || null,
-    durationSec: Math.round((Date.now() - started) / 1000),
-    limit: lim ? { ...lim, resetIn: agy.extractResetIn(raw) } : null,
-    needLogin: !!agy.extractLoginUrl(raw) || /not (logged|signed) in|login required|unauthenticated/i.test(raw),
-  });
+    const lim = r.limitDetected || null;
+    res.json({
+      ok: r.status === 'SUCCESS',
+      answer: r.response || '',
+      model: st.model,
+      usage: r.usage || null,
+      durationSec: Math.round((Date.now() - started) / 1000),
+      limit: lim ? { ...lim, resetIn: agy.extractResetIn(raw) } : null,
+      needLogin: !!agy.extractLoginUrl(raw) || /not (logged|signed) in|login required|unauthenticated/i.test(raw),
+    });
+  } catch (err) {
+    cleanupTempFiles(req.files);
+    next(err);
+  }
 });
 
 // ---------- CHAT STREAM (NDJSON) — timeline proses agy (tool, durasi, teks bertahap) ----------
@@ -390,6 +449,7 @@ function ndjsonOnce(res, obj) {
 async function runChatJob(job, slug, prompt, st) {
   const started = Date.now();
   let answerStep = null;
+  let partial = '';
   const onEvent = (ev) => {
     const su = ev.step_update;
     if (!su) return;
@@ -403,7 +463,7 @@ async function runChatJob(job, slug, prompt, st) {
         output: su.tool_info?.output ? String(su.tool_info.output).slice(0, 1500) : null,
       } });
     } else if (su.step_type === 'agent_response') {
-      if (su.text_delta) { answerStep = idx; job.emit({ type: 'delta', text: su.text_delta }); }
+      if (su.text_delta) { answerStep = idx; partial += su.text_delta; job.emit({ type: 'delta', text: su.text_delta }); }
       else if (su.state === 'DONE' && idx !== answerStep) {
         // langkah "mikir" sebelum memakai tool (agy tidak membuka teks thinking-nya, hanya durasi & token)
         job.emit({ type: 'step', step: { id: idx, kind: 'think', label: 'Berpikir', status: 'done',
@@ -424,10 +484,16 @@ async function runChatJob(job, slug, prompt, st) {
     if (r.usage) { st.last_usage = r.usage; st.last_model = st.model; st.last_ts = Date.now(); }
     agy.writeState(slug, st);
     const cancelled = signal.aborted || r.status === 'CANCELLED';
+    const timedOut = !cancelled && r.timedOut ? r.timedOut : null;
     const lim = cancelled ? null : (r.limitDetected || null);
+    let answer = cancelled ? '' : (r.response || '');
+    if (timedOut) {
+      const note = `⏱️ ${r.response}`;
+      answer = partial ? `${partial}\n\n${note}` : note;
+    }
     job.emit({
-      type: 'done', ok: !cancelled && r.status === 'SUCCESS', cancelled,
-      answer: cancelled ? '' : (r.response || ''), model: st.model, usage: r.usage || null,
+      type: 'done', ok: !cancelled && r.status === 'SUCCESS', cancelled, timedOut,
+      answer, model: st.model, usage: r.usage || null,
       durationSec: Math.round((Date.now() - started) / 1000),
       limit: lim ? { ...lim, resetIn: agy.extractResetIn(raw) } : null,
       needLogin: !cancelled && (!!agy.extractLoginUrl(raw) || /not (logged|signed) in|login required|unauthenticated/i.test(raw)),
@@ -438,25 +504,39 @@ async function runChatJob(job, slug, prompt, st) {
 }
 
 // Mulai job baru untuk chat ini, lalu stream event-nya.
-app.post('/api/chat/stream', upload.array('files', 5), async (req, res) => {
-  const { chatId, text, model } = req.body || {};
-  // validasi & cek login DULU, baru simpan upload (hindari file yatim)
-  if ((!text || !String(text).trim()) && !req.files?.length) return ndjsonOnce(res, { type: 'done', ok: false, answer: 'Error: teks atau file kosong' });
-  if (!agy.whoamiEmail()) return ndjsonOnce(res, { type: 'done', ok: false, needLogin: true, answer: 'Belum login. Buka menu Akun → Login dengan Google.' });
+app.post('/api/chat/stream', upload.array('files', MAX_UPLOAD_FILES), async (req, res) => {
+  try {
+    const { chatId, text, model } = req.body || {};
+    // validasi & cek login DULU, baru simpan upload ke folder sesi (hindari file yatim)
+    if ((!text || !String(text).trim()) && !req.files?.length) {
+      cleanupTempFiles(req.files);
+      return ndjsonOnce(res, { type: 'done', ok: false, answer: 'Error: teks atau file kosong' });
+    }
+    if (!agy.whoamiEmail()) {
+      cleanupTempFiles(req.files);
+      return ndjsonOnce(res, { type: 'done', ok: false, needLogin: true, answer: 'Belum login. Buka menu Akun → Login dengan Google.' });
+    }
 
-  const slug = agy.slugify(chatId || 'default');
-  if (jobs.isJobRunning(slug)) return ndjsonOnce(res, { type: 'done', ok: false, busy: true, answer: 'Chat ini masih memproses pesan sebelumnya.' });
+    const slug = agy.slugify(chatId || 'default');
+    if (jobs.isJobRunning(slug)) {
+      cleanupTempFiles(req.files);
+      return ndjsonOnce(res, { type: 'done', ok: false, busy: true, answer: 'Chat ini masih memproses pesan sebelumnya.' });
+    }
 
-  const files = persistUploads(chatId, req.files);
-  agy.topicDir(slug);
-  const st = agy.readState(slug);
-  if (model) st.model = model;
-  if (!st.model) st.model = agy.DEFAULT_MODEL;
-  agy.writeState(slug, st);
+    const files = persistUploads(chatId, req.files);
+    agy.topicDir(slug);
+    const st = agy.readState(slug);
+    if (model) st.model = model;
+    if (!st.model) st.model = agy.DEFAULT_MODEL;
+    agy.writeState(slug, st);
 
-  const job = jobs.createJob(slug);
-  runChatJob(job, slug, promptWithAttachments(text, files), st); // sengaja tidak di-await
-  pipeJob(job, 0, req, res);
+    const job = jobs.createJob(slug);
+    runChatJob(job, slug, promptWithAttachments(text, files), st); // sengaja tidak di-await
+    pipeJob(job, 0, req, res);
+  } catch (err) {
+    cleanupTempFiles(req.files);
+    if (!res.headersSent) ndjsonOnce(res, { type: 'done', ok: false, answer: `Error: ${err?.message || err}` });
+  }
 });
 
 // Sambung ulang ke job yang sedang/baru selesai berjalan: GET /api/chat/stream?chatId=..&since=<seq>
@@ -542,6 +622,36 @@ const dist = path.join(__dirname, '../dist');
 app.use(express.static(dist));
 app.get(/^\/(?!api\/|health$).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));
 
+// ---------- ERROR HANDLER (termasuk MulterError agar tidak jatuh ke HTTP 500 polos) ----------
+app.use((err, req, res, _next) => {
+  cleanupTempFiles(req.files);
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        ok: false,
+        code: err.code,
+        error: `Ukuran file${err.filename ? ` "${err.filename}"` : ''} melebihi batas maksimal ${MAX_UPLOAD_MB} MB per file.`,
+      });
+    }
+    if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE') {
+      return res.status(400).json({
+        ok: false,
+        code: err.code,
+        error: `Jumlah file melebihi batas maksimal ${MAX_UPLOAD_FILES} file per kirim.`,
+      });
+    }
+    return res.status(400).json({
+      ok: false,
+      code: err.code,
+      error: `Upload gagal (${err.code}): ${err.message}`,
+    });
+  }
+  console.error('[server] unhandled error:', err);
+  if (res.headersSent) return;
+  const status = err?.status || err?.statusCode || 500;
+  res.status(status).json({ ok: false, error: err?.message || 'Internal Server Error' });
+});
+
 // ---------- REAPER: stop container sandbox yang idle ----------
 const IDLE_MIN = parseFloat(process.env.AGY_SANDBOX_IDLE_MIN || '30');
 if (IDLE_MIN > 0) {
@@ -551,4 +661,4 @@ if (IDLE_MIN > 0) {
   });
 }
 
-app.listen(PORT, '0.0.0.0', () => console.log(`[server] AntiGPT + agybot logic di port ${PORT} | sandbox=${agy.SANDBOX_IMAGE} (agy dieksekusi di Docker) | auth=${process.env.AUTH_TOKEN ? '.env' : 'token sementara'} | idle-stop=${IDLE_MIN} mnt`));
+app.listen(PORT, '0.0.0.0', () => console.log(`[server] AntiGPT + agybot logic di port ${PORT} | sandbox=${agy.SANDBOX_IMAGE} (agy dieksekusi di Docker) | auth=${process.env.AUTH_TOKEN ? '.env' : 'token sementara'} | idle-stop=${IDLE_MIN} mnt | prompt-timeout=idle ${agy.PROMPT_IDLE_MIN}m / max ${agy.PROMPT_MAX_MIN}m`));

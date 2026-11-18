@@ -148,8 +148,11 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .send-btn.dim { background: var(--panel); color: var(--muted); opacity: .6; }
 .send-btn.ready { background: var(--text); opacity: 1; }
 .send-btn.stop { background: var(--danger); color: var(--surface); opacity: 1; }
-.attach-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-.chip { display: inline-flex; align-items: center; gap: 4px; background: var(--panel); border-radius: 8px; padding: 4px 8px; font-size: 12px; }
+.attach-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; max-height: 120px; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; background: var(--panel); border-radius: 8px; padding: 4px 8px; font-size: 12px; }
+.chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 210px; }
+.attach-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; padding: 6px 10px; border-radius: 10px; background: rgba(239, 68, 68, .12); color: #ef4444; font-size: 12.5px; line-height: 1.35; }
+.attach-error button { flex: none; color: inherit; display: grid; place-items: center; padding: 2px; }
 
 /* Overlay & Drawer */
 .overlay { position: absolute; inset: 0; background: rgba(0,0,0,.3); opacity: 0; pointer-events: none; transition: .25s; z-index: 10; }
@@ -270,6 +273,7 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .attach-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .attach-card { background: var(--surface); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .attach-icon { width: 48px; height: 48px; border-radius: 50%; background: var(--panel); display: grid; place-items: center; }
+.attach-hint { margin-top: 10px; font-size: 12px; color: var(--muted); text-align: center; }
 .card-list { background: var(--surface); border-radius: 16px; margin-bottom: 12px; overflow: hidden; }
 .model-row { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 14px 16px; text-align: left; border-bottom: 1px solid var(--border); }
 .model-row:last-child { border-bottom: none; }

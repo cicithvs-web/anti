@@ -2,13 +2,16 @@ import { useRef } from 'react';
 import { Image, FileUp } from 'lucide-react';
 import BottomSheet from './BottomSheet';
 import RippleButton from './RippleButton.jsx';
+import { DEFAULT_UPLOAD_LIMITS } from '../data/models';
 
-export default function AttachSheet({ open, onClose, onPick }) {
+export default function AttachSheet({ open, onClose, onPick, limits }) {
   const photoRef = useRef();
   const fileRef = useRef();
+  const maxFiles = limits?.files || DEFAULT_UPLOAD_LIMITS.files;
+  const maxMb = limits?.fileSizeMb || DEFAULT_UPLOAD_LIMITS.fileSizeMb;
 
   const handle = (e) => {
-    const files = [...e.target.files].map(f => ({ name: f.name, type: f.type, file: f }));
+    const files = [...e.target.files].map(f => ({ name: f.name, type: f.type, size: f.size, file: f }));
     if (files.length) onPick(files);
     e.target.value = '';
     onClose();
@@ -28,6 +31,7 @@ export default function AttachSheet({ open, onClose, onPick }) {
           File
         </RippleButton>
       </div>
+      <div className="attach-hint">Maks {maxFiles} file · {maxMb} MB per kirim</div>
     </BottomSheet>
   );
 }

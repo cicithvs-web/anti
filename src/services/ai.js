@@ -84,14 +84,27 @@ export async function loadModels({ email, force = false } = {}) {
 // supaya pemanggil bisa menyambung ulang. fetch yang gagal total / AbortError tetap di-throw.
 async function readNdjson(r, onEvent) {
   checkAuth(r);
-  if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok || !r.body) {
+    let msg = r.status === 413
+      ? 'Ukuran file melebihi batas upload server.'
+      : `HTTP ${r.status}`;
+    try {
+      const ct = r.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const j = await r.json();
+        if (j?.error) msg = j.error;
+      }
+    } catch {}
+    throw new Error(msg);
+  }
   const reader = r.body.getReader();
   const dec = new TextDecoder();
-  let buf = '', done = null, none = false;
+  let buf = '', done = null, none = false, alive = false;
   const handle = (line) => {
     line = line.trim();
     if (!line) return;
     let ev; try { ev = JSON.parse(line); } catch { return; }
+    alive = true;
     if (ev.type === 'ping') return;
     if (ev.type === 'none') { none = true; return; }
     if (ev.type === 'done') done = ev;
@@ -110,7 +123,7 @@ async function readNdjson(r, onEvent) {
     if (e.name === 'AbortError') throw e;
     // koneksi putus di tengah stream → biar pemanggil reconnect
   }
-  return { done, none };
+  return { done, none, alive };
 }
 
 // Mulai job baru di server
@@ -137,7 +150,7 @@ export async function resumeChatStream({ chatId, since = 0, signal }, onEvent) {
 export function formatDone(done) {
   if (done.needLogin && !done.ok) throw new Error('🔑 Belum login ke akun AI. Tap avatar di kiri bawah → Login dengan Google.');
   let out = done.answer || '(tidak ada jawaban)';
-  if (!done.ok && done.answer) out = '❌ ' + out;
+  if (!done.ok && done.answer && !done.timedOut) out = '❌ ' + out;
   if (done.limit) {
     out += `\n\n🚨 **Limit terdeteksi (${done.limit.label})**` +
       (done.limit.resetIn ? ` — reset dalam **${done.limit.resetIn}**` : '') +

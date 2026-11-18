@@ -157,23 +157,47 @@ async function ensureSandboxOnce(slug) {
 /**
  * Spawn proses di dalam sandbox: docker exec -i -w /home/AntiGPT <container> <argv...>
  * argv dipakai langsung (tanpa bash -c) supaya output agy (json/stream-json) mengalir bersih.
- * opts: { timeoutMs, onTimeout } — onTimeout(slug) dipanggil sekali saat timeout.
+ * opts:
+ *   - timeoutMs     : batas total waktu jalan (ms)
+ *   - idleTimeoutMs : batas diam tanpa output stdout/stderr (ms) — di-reset tiap ada chunk data
+ *   - onTimeout(reason, slug) : dipanggil sekali saat salah satu timeout tercapai ('idle' | 'max')
  */
-export async function spawnInSandbox(slug, argv, { timeoutMs, onTimeout } = {}) {
+export async function spawnInSandbox(slug, argv, { timeoutMs, idleTimeoutMs, onTimeout } = {}) {
   const containerName = await ensureSandbox(slug);
   const child = spawn('docker', ['exec', '-i', '-w', SANDBOX_HOME, containerName, ...argv], {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   touchSandbox(slug);
-  child.on('close', () => touchSandbox(slug));
-  if (timeoutMs) {
-    const timer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch {}
-      try { onTimeout && onTimeout(slug); } catch {}
-    }, timeoutMs);
-    child.on('close', () => clearTimeout(timer));
-    child.on('error', () => clearTimeout(timer));
+
+  let finished = false;
+  let maxTimer = null;
+  let idleTimer = null;
+  const clearTimers = () => {
+    if (maxTimer) { clearTimeout(maxTimer); maxTimer = null; }
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+  };
+  const triggerTimeout = (reason) => {
+    if (finished) return;
+    finished = true;
+    clearTimers();
+    try { child.kill('SIGKILL'); } catch {}
+    try { onTimeout && onTimeout(reason, slug); } catch {}
+  };
+  const armIdle = () => {
+    if (!idleTimeoutMs || finished) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => triggerTimeout('idle'), idleTimeoutMs);
+  };
+
+  if (timeoutMs) maxTimer = setTimeout(() => triggerTimeout('max'), timeoutMs);
+  if (idleTimeoutMs) {
+    armIdle();
+    const bump = () => { touchSandbox(slug); armIdle(); };
+    child.stdout.on('data', bump);
+    child.stderr.on('data', bump);
   }
+  child.on('close', () => { finished = true; clearTimers(); touchSandbox(slug); });
+  child.on('error', () => { finished = true; clearTimers(); });
   return child;
 }
 

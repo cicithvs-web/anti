@@ -15,7 +15,7 @@ import {
   apiStatus, authCheck, AUTH_EVENT, startChatStream, resumeChatStream, formatDone,
   stopChat as apiStopChat, deleteChatOnServer, cachedModels, loadModels,
 } from './services/ai';
-import { MODELS, DEFAULT_MODEL } from './data/models';
+import { MODELS, DEFAULT_MODEL, DEFAULT_UPLOAD_LIMITS } from './data/models';
 
 const USER_NAME = 'Xixi';
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
@@ -33,6 +33,7 @@ export default function App() {
   const [model, setModel] = useState(() => localStorage.getItem('model') || DEFAULT_MODEL);
   const [models, setModels] = useState(() => cachedModels()?.list || MODELS);
   const [attachments, setAttachments] = useState([]);
+  const [attachError, setAttachError] = useState('');
   // status proses per chat (bukan global), supaya tombol stop tidak ikut ke chat lain
   const [loadingIds, setLoadingIds] = useState(() => new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -162,7 +163,8 @@ export default function App() {
         const before = lastSeq;
         try {
           res = await resumeChatStream({ chatId: id, since: lastSeq + 1, signal }, onEvent);
-          if (lastSeq > before) tries = 0;
+          // Selama stream masih hidup (termasuk ping), reset counter gagal reconnect
+          if (res.alive || lastSeq > before) tries = 0;
         } catch (e) {
           if (e.name === 'AbortError' || e.status === 401) throw e;
           res = {};
@@ -208,6 +210,7 @@ export default function App() {
     const files = input?.files || attachments;
     if ((!text.trim() && !files.length) || (activeId && loadingIds.has(activeId))) return;
     setAttachments([]);
+    setAttachError('');
     const userMsg = { role: 'user', content: text, attachments: files.map(f => ({ name: f.name, type: f.type })) };
     const useModel = active?.model || model;
 
@@ -225,6 +228,40 @@ export default function App() {
     if (id === activeId) setActiveId(null);
     // hapus container sandbox + folder sesi di server
     deleteChatOnServer(id).catch(() => {});
+  };
+
+  const uploadLimits = account?.limits || DEFAULT_UPLOAD_LIMITS;
+  const pickAttachments = (picked) => {
+    const maxFiles = uploadLimits.files || DEFAULT_UPLOAD_LIMITS.files;
+    const maxMb = uploadLimits.fileSizeMb || DEFAULT_UPLOAD_LIMITS.fileSizeMb;
+    const maxBytes = maxMb * 1024 * 1024;
+    let totalBytes = attachments.reduce((sum, f) => sum + (f.size ?? f.file?.size ?? 0), 0);
+    const accepted = [];
+    const errors = [];
+    for (const f of picked) {
+      const sz = f.size ?? f.file?.size ?? 0;
+      if (sz > maxBytes) {
+        errors.push(`"${f.name}" melebihi ${maxMb} MB`);
+        continue;
+      }
+      if (attachments.length + accepted.length >= maxFiles) {
+        errors.push(`maksimal ${maxFiles} file per kirim`);
+        break;
+      }
+      if (totalBytes + sz > maxBytes) {
+        errors.push(`total ukuran melebihi ${maxMb} MB`);
+        continue;
+      }
+      totalBytes += sz;
+      accepted.push(f);
+    }
+    if (accepted.length) setAttachments(a => [...a, ...accepted]);
+    if (errors.length) {
+      const prefix = accepted.length ? 'Sebagian file dilewati: ' : 'File ditolak: ';
+      setAttachError(prefix + [...new Set(errors)].join('; ') + '.');
+    } else {
+      setAttachError('');
+    }
   };
 
   const loading = !!activeId && loadingIds.has(activeId);
@@ -247,7 +284,8 @@ export default function App() {
         <ChatInput
           isNewChat={!active}
           modelName={modelName} attachments={attachments}
-          onRemoveAttachment={(i) => setAttachments(a => a.filter((_, j) => j !== i))}
+          attachError={attachError} onClearAttachError={() => setAttachError('')}
+          onRemoveAttachment={(i) => { setAttachments(a => a.filter((_, j) => j !== i)); setAttachError(''); }}
           onSend={handleSend} onStop={() => stopChat(activeId)} disabled={loading}
           onOpenAttach={() => setSheet('attach')} onOpenModel={() => setSheet('model')}
         />
@@ -265,7 +303,7 @@ export default function App() {
       />
 
       <AttachSheet open={sheet === 'attach'} onClose={() => setSheet(null)}
-        onPick={files => setAttachments(a => [...a, ...files])} />
+        limits={uploadLimits} onPick={pickAttachments} />
 
       <ModelSheet open={sheet === 'model'} onClose={() => setSheet(null)}
         model={chatModel} list={models} onOpen={() => refreshModels(false)} onChangeModel={changeModel} />

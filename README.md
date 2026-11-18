@@ -79,7 +79,12 @@ Variabel environment opsional:
 | `AGY_SANDBOX_PIDS` | `512` | Limit jumlah proses |
 | `AGY_TOKEN_FILE` | `server/sandbox-data/gemini/antigravity-cli/antigravity-oauth-token` | Lokasi token OAuth |
 | `AGY_SANDBOX_IDLE_MIN` | `30` | Menit idle sebelum container chat di-`docker stop` (0 = nonaktif). Di-start lagi otomatis saat dipakai |
+| `AGY_PROMPT_IDLE_MIN` | `10` | Menit diam tanpa aktivitas/output sebelum 1 eksekusi AI dianggap macet & dihentikan (0 = nonaktif) |
+| `AGY_PROMPT_MAX_MIN` | `60` | Batas maksimal total durasi 1 giliran eksekusi AI dalam menit (0 = nonaktif) |
+| `AGY_MAX_PARALLEL` | `2` | Jumlah chat yang bisa diproses bersamaan |
 | `AUTH_TOKEN` | — | Token akses web/API (lihat bagian Token akses) |
+| `MAX_UPLOAD_FILES` | `20` | Maksimal jumlah file lampiran per kirim |
+| `MAX_UPLOAD_MB` | `100` | Maksimal ukuran per file lampiran (MB) |
 | `PORT` | `3000` | Port server |
 
 Endpoint chat:

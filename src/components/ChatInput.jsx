@@ -7,7 +7,7 @@ import useSpeechRecorder from '../hooks/useSpeechRecorder.js';
 const RECORD_CMD = /^\/(record|voice)$/i;
 
 export default function ChatInput({
-  isNewChat, modelName, attachments,
+  isNewChat, modelName, attachments, attachError, onClearAttachError,
   onRemoveAttachment, onSend, onStop, onOpenAttach, onOpenModel, disabled,
 }) {
   const [text, setText] = useState('');
@@ -17,17 +17,23 @@ export default function ChatInput({
 
   // Re-evaluasi mode saat pindah chat / new chat
   useEffect(() => {
-    // Pindah ke layar welcome -> selalu expanded; pindah ke chat tanpa fokus -> collapsed
-    setExpanded(!!isNewChat);
+    // Pindah ke layar welcome -> selalu expanded; pindah ke chat tanpa fokus -> collapsed (kecuali ada lampiran)
+    setExpanded(!!isNewChat || attachments?.length > 0 || !!attachError);
     if (taRef.current) taRef.current.style.height = 'auto';
   }, [isNewChat]);
+
+  // Saat file dilampirkan atau ada peringatan upload, buka input box supaya chip/pesan langsung terlihat
+  useEffect(() => {
+    if (attachments?.length > 0 || attachError) setExpanded(true);
+    else if (!isNewChat && !text.trim() && document.activeElement !== taRef.current) setExpanded(false);
+  }, [attachments?.length, attachError, isNewChat, text]);
 
   // Saat textarea kehilangan fokus & kosong di layar chat -> kembali ke mode ringkas
   const handleBlur = (e) => {
     // Fokus pindah ke tombol di dalam input-box (mis. pilih model) -> jangan collapse dulu,
     // kalau tidak tombolnya keburu hilang sebelum event click sempat jalan.
     if (boxRef.current && e?.relatedTarget && boxRef.current.contains(e.relatedTarget)) return;
-    if (!isNewChat && !text.trim() && attachments?.length === 0) {
+    if (!isNewChat && !text.trim() && attachments?.length === 0 && !attachError) {
       setExpanded(false);
       if (taRef.current) taRef.current.style.height = 'auto';
     }
@@ -76,16 +82,28 @@ export default function ChatInput({
 
   return (
     <div ref={boxRef} className={'input-box' + (expanded ? ' expanded' : '') + (hasText ? ' has-text' : '')}>
-      {expanded && attachments?.length > 0 && (
-        <div className="files attach-row">
-          {attachments.map((f, i) => (
-            <span key={i} className="chip">
-              {f.name}
-              <button onClick={() => onRemoveAttachment(i)} aria-label="Hapus lampiran">
-                <X size={12} />
+      {expanded && (attachments?.length > 0 || attachError) && (
+        <div className="files">
+          {attachments?.length > 0 && (
+            <div className="attach-row">
+              {attachments.map((f, i) => (
+                <span key={i} className="chip">
+                  <span className="chip-name">{f.name}</span>
+                  <button type="button" onClick={() => onRemoveAttachment(i)} aria-label="Hapus lampiran">
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          {attachError && (
+            <div className="attach-error" role="alert">
+              <span>{attachError}</span>
+              <button type="button" onClick={onClearAttachError} aria-label="Tutup peringatan">
+                <X size={13} />
               </button>
-            </span>
-          ))}
+            </div>
+          )}
         </div>
       )}
       <textarea
