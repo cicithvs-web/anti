@@ -24,55 +24,171 @@ function safeName(name) {
   return String(name || 'attachment').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'attachment';
 }
 
-// Hanya layani file dari folder project milik chat tersebut; jangan pernah menerima path absolut dari browser.
+// Hanya layani file dari folder project/sesi milik chat tersebut; jangan pernah menerima path absolut dari browser.
 const imageTypes = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
   '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif',
+  '.svg': 'image/svg+xml',
 };
 const fileTypes = {
   ...imageTypes,
-  '.zip': 'application/zip', '.pdf': 'application/pdf', '.txt': 'text/plain; charset=utf-8',
+  '.zip': 'application/zip', '.tar': 'application/x-tar', '.gz': 'application/gzip',
+  '.pdf': 'application/pdf', '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8', '.csv': 'text/csv; charset=utf-8', '.json': 'application/json',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.py': 'text/x-python; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.cjs': 'text/javascript; charset=utf-8',
+  '.jsx': 'text/javascript; charset=utf-8',
+  '.ts': 'text/typescript; charset=utf-8',
+  '.tsx': 'text/typescript; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.sh': 'application/x-sh; charset=utf-8',
+  '.sql': 'application/sql; charset=utf-8',
+  '.yaml': 'text/yaml; charset=utf-8',
+  '.yml': 'text/yaml; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
 };
 
-function serveChatProjectFile(req, res, { imageOnly = false, download = false } = {}) {
-  const filename = String(req.params.filename || '');
-  const extension = path.extname(filename).toLowerCase();
-  if (!filename || filename.startsWith('.') || filename.includes('/') || filename.includes('\\')
-    || (imageOnly && !imageTypes[extension])) return res.sendStatus(404);
+const FORBIDDEN_FILES = new Set(['state.json', 'agent.md', 'agents.md', 'gemini.md']);
 
-  const sessionRoot = path.resolve(agy.BASE, agy.slugify(req.params.chatId));
-  const projectRoot = path.join(sessionRoot, 'project');
+function resolveChatFile(chatId, requestedPath, { imageOnly = false } = {}) {
+  const rawPath = String(requestedPath || '').trim();
+  if (!rawPath || rawPath.includes('..')) return null;
+
+  const slug = agy.slugify(chatId);
+  const sessionRoot = path.resolve(agy.BASE, slug);
+  if (!fs.existsSync(sessionRoot)) return null;
+
+  let realSessionRoot;
   try {
-    const realSessionRoot = fs.realpathSync(sessionRoot);
-    const realProjectRoot = fs.realpathSync(projectRoot);
-    const filePath = fs.realpathSync(path.join(projectRoot, filename));
-    if (!realProjectRoot.startsWith(realSessionRoot + path.sep) || !filePath.startsWith(realProjectRoot + path.sep)) {
-      return res.sendStatus(404);
+    realSessionRoot = fs.realpathSync(sessionRoot);
+  } catch {
+    return null;
+  }
+
+  const baseName = path.basename(rawPath);
+  if (!baseName || baseName.startsWith('.') || FORBIDDEN_FILES.has(baseName.toLowerCase())) {
+    return null;
+  }
+
+  const ext = path.extname(baseName).toLowerCase();
+  if (imageOnly && !imageTypes[ext]) {
+    return null;
+  }
+
+  const projectRoot = path.join(sessionRoot, 'project');
+
+  const checkCandidate = (candidate) => {
+    try {
+      if (!fs.existsSync(candidate)) return null;
+      const real = fs.realpathSync(candidate);
+      const stat = fs.statSync(real);
+      if (!stat.isFile()) return null;
+      return real;
+    } catch {
+      return null;
     }
+  };
+
+  // 1. Cek di projectRoot (sesuai requestedPath atau baseName)
+  const candidate1 = checkCandidate(path.join(projectRoot, rawPath));
+  if (candidate1 && candidate1.startsWith(realSessionRoot + path.sep)) return candidate1;
+
+  if (rawPath !== baseName) {
+    const candidate1b = checkCandidate(path.join(projectRoot, baseName));
+    if (candidate1b && candidate1b.startsWith(realSessionRoot + path.sep)) return candidate1b;
+  }
+
+  // 2. Cek di sessionRoot (root workspace jika AI simpan langsung di /home/AntiGPT)
+  const candidate2 = checkCandidate(path.join(sessionRoot, rawPath));
+  if (candidate2 && candidate2.startsWith(realSessionRoot + path.sep)) return candidate2;
+
+  if (rawPath !== baseName) {
+    const candidate2b = checkCandidate(path.join(sessionRoot, baseName));
+    if (candidate2b && candidate2b.startsWith(realSessionRoot + path.sep)) return candidate2b;
+  }
+
+  // 3. Cek di brain directory (jika file merupakan artifact report dari agy)
+  const state = agy.readState(slug);
+  if (state?.conversation_id) {
+    const brainDir = path.join(agySandbox.GEMINI_DATA_DIR, 'antigravity-cli', 'brain', String(state.conversation_id));
+    if (fs.existsSync(brainDir)) {
+      try {
+        const realBrainDir = fs.realpathSync(brainDir);
+        const candidate3 = checkCandidate(path.join(brainDir, baseName));
+        if (candidate3 && candidate3.startsWith(realBrainDir + path.sep)) {
+          return candidate3;
+        }
+      } catch {}
+    }
+  }
+
+  // 4. Cari rekursif di projectRoot lalu sessionRoot jika ada di dalam subfolder
+  const searchRecursive = (dir, depth = 0) => {
+    if (depth > 4) return null;
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isFile() && entry.name.toLowerCase() === baseName.toLowerCase()) {
+          const real = checkCandidate(full);
+          if (real && real.startsWith(realSessionRoot + path.sep)) return real;
+        } else if (entry.isDirectory()) {
+          const found = searchRecursive(full, depth + 1);
+          if (found) return found;
+        }
+      }
+    } catch {}
+    return null;
+  };
+
+  if (fs.existsSync(projectRoot)) {
+    const foundInProject = searchRecursive(projectRoot);
+    if (foundInProject) return foundInProject;
+  }
+
+  return searchRecursive(sessionRoot);
+}
+
+function serveChatProjectFile(req, res, { imageOnly = false, download = false } = {}) {
+  const rawParam = req.params.filename || req.params[0] || '';
+  let filename = String(rawParam);
+  try { filename = decodeURIComponent(filename); } catch {}
+
+  const filePath = resolveChatFile(req.params.chatId, filename, { imageOnly });
+  if (!filePath) return res.sendStatus(404);
+
+  try {
     const stat = fs.statSync(filePath);
-    if (!stat.isFile()) return res.sendStatus(404);
     if (stat.size > (imageOnly ? 25 : 100) * 1024 * 1024) return res.sendStatus(413);
 
-    res.set('Content-Type', imageOnly ? imageTypes[extension] : (fileTypes[extension] || 'application/octet-stream'));
+    const ext = path.extname(filePath).toLowerCase();
+    res.set('Content-Type', imageOnly ? imageTypes[ext] : (fileTypes[ext] || 'application/octet-stream'));
     res.set('X-Content-Type-Options', 'nosniff');
     res.set('Cache-Control', 'private, max-age=300');
-    const send = download ? res.download(filePath, filename, (err) => {
-      if (err && !res.headersSent) res.sendStatus(err.statusCode || 404);
-    }) : res.sendFile(filePath, (err) => {
-      if (err && !res.headersSent) res.sendStatus(err.statusCode || 404);
-    });
+
+    const downloadName = path.basename(filePath);
+    const send = download
+      ? res.download(filePath, downloadName, (err) => {
+          if (err && !res.headersSent) res.sendStatus(err.statusCode || 404);
+        })
+      : res.sendFile(filePath, (err) => {
+          if (err && !res.headersSent) res.sendStatus(err.statusCode || 404);
+        });
     return send;
   } catch {
     return res.sendStatus(404);
   }
 }
 
-app.get('/api/chats/:chatId/images/:filename', (req, res) => serveChatProjectFile(req, res, { imageOnly: true }));
-app.get('/api/chats/:chatId/files/:filename', (req, res) => serveChatProjectFile(req, res, { download: true }));
+app.get('/api/chats/:chatId/images/:filename(*)', (req, res) => serveChatProjectFile(req, res, { imageOnly: true }));
+app.get('/api/chats/:chatId/files/:filename(*)', (req, res) => serveChatProjectFile(req, res, { download: true }));
 
 function persistUploads(chatId, files = []) {
   if (!files.length) return [];

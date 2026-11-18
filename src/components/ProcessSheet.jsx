@@ -27,15 +27,17 @@ export default function ProcessSheet({ open, onClose, msg }) {
   return (
     <>
       <div className={'settings-overlay' + (visible ? ' open' : '')} onClick={onClose} />
-      <div className={'settings-sheet' + (visible ? ' open' : '')}>
-        <div className="settings-page">
+      <div className={'settings-sheet proc-sheet' + (visible ? ' open' : '')}>
+        <div className="proc-sheet-top">
           <div className="settings-handle" />
           <div className="settings-head">
             <button className="icon-btn" onClick={onClose} aria-label="Tutup"><X size={22} /></button>
             <span className="settings-title">Ringkasan</span>
             <span style={{ width: 36 }} />
           </div>
+        </div>
 
+        <div className="proc-scroll">
           <div className="proc-list">
             {steps.length === 0 && (
               <div className="proc-item">

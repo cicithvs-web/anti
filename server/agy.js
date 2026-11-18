@@ -44,20 +44,21 @@ export function topicDir(slug) {
   return _topicDir(d, slug);
 }
 function _topicDir(d, slug) {
-  const agentMd = path.join(d, 'AGENT.md');
-  const imageGuide = '\n\n## Menampilkan gambar di chat\nJika membuat gambar untuk pengguna, pastikan file final disimpan di folder ./project/ dalam format PNG, JPG, WebP, GIF, atau AVIF. Cantumkan gambar di jawaban memakai Markdown dengan nama file relatif, misalnya ![Deskripsi gambar](gambar.png). Jangan gunakan URL file:// atau path absolut; salin gambar hasil generate ke ./project/ terlebih dahulu.\n';
-  const fileGuide = '\n\n## Mengirim file hasil di chat\nSimpan setiap file hasil kerja di folder ./project/. Pada jawaban akhir, selalu berikan tautan Markdown dengan nama file relatif untuk setiap file yang perlu diunduh, misalnya [hasil.zip](hasil.zip). Jika menghasilkan beberapa file terkait, sertakan tautan ke file satu per satu dan buat ZIP berisi semuanya agar pengguna bisa mengunduh sekaligus. Jangan hanya menulis bahwa file sudah disimpan tanpa tautan unduhan.\n';
+  const agentsMd = path.join(d, 'AGENTS.md');
+  const imageGuide = '\n\n## Menampilkan gambar di chat\nJika membuat gambar untuk pengguna, pastikan file final disimpan di folder ./project/ (atau folder kerja) dalam format PNG, JPG, WebP, GIF, atau AVIF. Cantumkan gambar di jawaban memakai Markdown dengan nama file relatif, misalnya ![Deskripsi gambar](gambar.png). Jangan gunakan URL file:// atau path absolut; salin gambar hasil generate ke ./project/ terlebih dahulu.\n';
+  const fileGuide = '\n\n## Mengirim file hasil di chat\nSimpan setiap file hasil kerja di folder ./project/ (atau folder kerja). Pada jawaban akhir, selalu berikan tautan Markdown dengan nama file relatif untuk setiap file yang perlu diunduh, misalnya [hasil.zip](hasil.zip) atau [script.py](script.py). Jika menghasilkan beberapa file terkait, sertakan tautan ke file satu per satu dan buat ZIP berisi semuanya agar pengguna bisa mengunduh sekaligus lewat tombol unduh di chat. Jangan gunakan tautan bertipe file:// atau path absolut di teks jawaban akhir.\n';
   const uploadGuide = '\n\n## File upload dari pengguna\nFile yang di-upload pengguna otomatis tersimpan di folder ./project/uploads/. Baca file di sana untuk menjawab; salin hasil kerja yang relevan ke ./project/ bila perlu.\n';
-  if (!fs.existsSync(agentMd)) {
-    fs.writeFileSync(agentMd, `# AGENT — ${slug}\n\nKamu adalah agent coding di folder proyek "${slug}".\nSemua file yang di-upload user ada di folder ./project/uploads/.\nKerjakan tugas di dalam folder ini. Tulis catatan penting ke AGENT.md ini.\n\nFormat Tabel & Respon:\n- Jika user meminta perbandingan, jadwal, daftar harga, spesifikasi, atau data terstruktur, selalu sajikan dalam format Markdown Table standar.\n- Berikan respon yang ramah, ringkas, solutif, dan profesional${imageGuide}${fileGuide}${uploadGuide}\nDibuat otomatis: ${new Date().toLocaleString('id-ID')}\n`);
+
+  if (!fs.existsSync(agentsMd)) {
+    fs.writeFileSync(agentsMd, `# AGENTS — ${slug}\n\nKamu adalah agent coding di folder proyek "${slug}".\nSemua file yang di-upload user ada di folder ./project/uploads/.\nKerjakan tugas di dalam folder ini. Tulis catatan penting ke AGENTS.md ini.\n\nFormat Tabel & Respon:\n- Jika user meminta perbandingan, jadwal, daftar harga, spesifikasi, atau data terstruktur, selalu sajikan dalam format Markdown Table standar.\n- Berikan respon yang ramah, ringkas, solutif, dan profesional${imageGuide}${fileGuide}${uploadGuide}\nDibuat otomatis: ${new Date().toLocaleString('id-ID')}\n`);
   } else {
-    const current = fs.readFileSync(agentMd, 'utf8');
+    const current = fs.readFileSync(agentsMd, 'utf8');
     const missingGuides = [
       current.includes('## Menampilkan gambar di chat') ? '' : imageGuide,
       current.includes('## Mengirim file hasil di chat') ? '' : fileGuide,
       current.includes('## File upload dari pengguna') ? '' : uploadGuide,
     ].join('');
-    if (missingGuides) fs.appendFileSync(agentMd, missingGuides);
+    if (missingGuides) fs.appendFileSync(agentsMd, missingGuides);
   }
   return d;
 }

@@ -56,8 +56,16 @@ function ChatImage({ src, alt, chatId }) {
 function ChatFileCard({ filename, chatId }) {
   const extension = filename.split('.').pop()?.toUpperCase() || 'FILE';
   const isZip = extension === 'ZIP';
+  const url = chatFileUrl(chatId, filename);
   return (
-    <a className="md-file-card" href={chatFileUrl(chatId, filename)} download={filename} aria-label={`Unduh ${filename}`}>
+    <a
+      className="md-file-card"
+      href={url}
+      download={filename}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={`Unduh ${filename}`}
+    >
       <span className="md-file-card-icon">{isZip ? <Archive size={22} /> : <File size={22} />}</span>
       <span className="md-file-card-info"><strong>{filename}</strong><small>{extension}</small></span>
       <span className="md-file-card-action"><Download size={20} /></span>

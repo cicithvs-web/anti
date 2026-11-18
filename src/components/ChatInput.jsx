@@ -1,6 +1,10 @@
 import { useRef, useState, useEffect } from 'react';
 import { Plus, Mic, ArrowUp, Square, X } from 'lucide-react';
 import RippleButton from './RippleButton.jsx';
+import useSpeechRecorder from '../hooks/useSpeechRecorder.js';
+
+// Perintah lokal: tidak dikirim ke agy, langsung toggle rekam suara
+const RECORD_CMD = /^\/(record|voice)$/i;
 
 export default function ChatInput({
   isNewChat, modelName, attachments,
@@ -32,8 +36,29 @@ export default function ChatInput({
     ta.style.height = Math.min(ta.scrollHeight, window.innerHeight * 0.4) + 'px';
   };
 
+  // ---- rekam suara (/record atau tombol mic) ----
+  const baseTextRef = useRef('');
+  const mic = useSpeechRecorder({
+    onTranscript: (t) => {
+      const base = baseTextRef.current;
+      setText(base && t ? base.replace(/\s*$/, ' ') + t : base + t);
+      requestAnimationFrame(autoResize);
+    },
+  });
+  const toggleRecord = (currentText = text) => {
+    if (!mic.recording) { baseTextRef.current = currentText; setExpanded(true); }
+    mic.toggle();
+  };
+
   const submit = () => {
+    if (RECORD_CMD.test(text.trim())) {
+      setText('');
+      if (taRef.current) taRef.current.style.height = 'auto';
+      toggleRecord('');
+      return;
+    }
     if ((!text.trim() && !attachments?.length) || disabled) return;
+    if (mic.recording) mic.abort();
     onSend({ text: text.trim(), files: attachments });
     setText('');
     if (taRef.current) taRef.current.style.height = 'auto';
@@ -63,7 +88,7 @@ export default function ChatInput({
         ref={taRef}
         className="ta"
         rows={1}
-        placeholder="Tanya apa saja..."
+        placeholder={mic.error || (mic.recording ? 'Mendengarkan… (tap mic untuk berhenti)' : 'Tanya apa saja...')}
         value={text}
         onFocus={() => setExpanded(true)}
         onBlur={handleBlur}
@@ -83,8 +108,14 @@ export default function ChatInput({
         )}
       </div>
       <div className="right-tools">
-        {!hasText && (
-          <RippleButton className="circle-btn mic" aria-label="Mic">
+        {(!hasText || mic.recording) && (
+          <RippleButton
+            className={'circle-btn mic' + (mic.recording ? ' recording' : '') + (mic.error ? ' mic-error' : '')}
+            onClick={() => toggleRecord()}
+            aria-label={mic.recording ? 'Berhenti merekam' : 'Rekam suara'}
+            aria-pressed={mic.recording}
+            title={mic.error || (mic.recording ? 'Berhenti merekam' : 'Rekam suara (/record)')}
+          >
             <Mic size={20} />
           </RippleButton>
         )}

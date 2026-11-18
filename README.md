@@ -108,5 +108,5 @@ mkdir -p server/sandbox-data && cp -a ~/.gemini server/sandbox-data/gemini
 - `server/sandboxManager.js` — manajemen container Docker sandbox per chat
 - `server/Dockerfile.sandbox` — definisi image sandbox (Ubuntu 24.04 + tools + Antigravity CLI)
 - `server/.dockerignore` — mengecualikan `sessions/` dan `sandbox-data/` (token OAuth) dari build context
-- `server/sessions/` — workspace per chat (`AGENT.md`, `project/`, `state.json`)
+- `server/sessions/` — workspace per chat (`AGENTS.md`, `project/`, `state.json`)
 - `server/sandbox-data/` — state agy yang persisten (token OAuth, conversations)
