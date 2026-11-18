@@ -13,6 +13,7 @@ export default function ChatInput({
   const [text, setText] = useState('');
   const [expanded, setExpanded] = useState(isNewChat);
   const taRef = useRef(null);
+  const boxRef = useRef(null);
 
   // Re-evaluasi mode saat pindah chat / new chat
   useEffect(() => {
@@ -22,7 +23,10 @@ export default function ChatInput({
   }, [isNewChat]);
 
   // Saat textarea kehilangan fokus & kosong di layar chat -> kembali ke mode ringkas
-  const handleBlur = () => {
+  const handleBlur = (e) => {
+    // Fokus pindah ke tombol di dalam input-box (mis. pilih model) -> jangan collapse dulu,
+    // kalau tidak tombolnya keburu hilang sebelum event click sempat jalan.
+    if (boxRef.current && e?.relatedTarget && boxRef.current.contains(e.relatedTarget)) return;
     if (!isNewChat && !text.trim() && attachments?.length === 0) {
       setExpanded(false);
       if (taRef.current) taRef.current.style.height = 'auto';
@@ -71,7 +75,7 @@ export default function ChatInput({
   const canSend = (hasText || attachments?.length > 0) && !disabled;
 
   return (
-    <div className={'input-box' + (expanded ? ' expanded' : '') + (hasText ? ' has-text' : '')}>
+    <div ref={boxRef} className={'input-box' + (expanded ? ' expanded' : '') + (hasText ? ' has-text' : '')}>
       {expanded && attachments?.length > 0 && (
         <div className="files attach-row">
           {attachments.map((f, i) => (
@@ -102,7 +106,12 @@ export default function ChatInput({
           <Plus size={22} />
         </RippleButton>
         {expanded && (
-          <RippleButton className={'model-pill' + (!expanded ? ' compact' : '')} onClick={onOpenModel}>
+          <RippleButton
+            className={'model-pill' + (!expanded ? ' compact' : '')}
+            // cegah textarea blur di mousedown (blur -> collapse -> tombol hilang sebelum click)
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => { onOpenModel(); taRef.current?.blur(); }}
+          >
             {modelName}
           </RippleButton>
         )}

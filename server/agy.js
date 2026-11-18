@@ -4,7 +4,7 @@
 // tanpa menyentuh server.
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   ensureSandbox, spawnInSandbox, killAgy,
@@ -117,6 +117,7 @@ export function agyPrompt(slug, text, model, conversationId) {
 // onEvent(ev) dipanggil per baris NDJSON (init / step_update / result) → buat timeline "proses mikir".
 export function agyPromptStream(slug, text, model, conversationId, onEvent, signal) {
   return new Promise(async (resolve) => {
+    if (signal?.aborted) { resolve({ status: 'CANCELLED', response: '', cancelled: true }); return; }
     const args = ['-p', text, '--output-format', 'stream-json', '--dangerously-skip-permissions'];
     if (model) args.push('--model', model);
     if (conversationId) args.push('--conversation', conversationId);
@@ -163,48 +164,63 @@ export function agyPromptStream(slug, text, model, conversationId, onEvent, sign
   });
 }
 
-// ---------- antrean (MAX_PARALLEL = 2, per slug) ----------
+// ---------- antrean global FIFO (MAX_PARALLEL = 2) ----------
+// Satu antrean untuk semua chat supaya adil (siapa duluan, dia duluan).
+// Job yang dibatalkan saat masih menunggu langsung dikeluarkan dari antrean (tidak pernah dijalankan).
 export const MAX_PARALLEL = 2;
-export let running = 0;
-export const queues = {};
+let running = 0;
+const queue = []; // { slug, fn, resolve, signal }
+const cancelledResult = () => ({ status: 'CANCELLED', response: '', cancelled: true });
 function pump() {
-  while (running < MAX_PARALLEL) {
-    let next = null;
-    for (const slug of Object.keys(queues)) {
-      if (queues[slug].length) { next = { slug, job: queues[slug].shift() }; break; }
-    }
-    if (!next) return;
+  while (running < MAX_PARALLEL && queue.length) {
+    const job = queue.shift();
+    if (job.signal?.aborted) { job.resolve(cancelledResult()); continue; }
     running++;
-    Promise.resolve().then(next.job.fn)
-      .then((r) => next.job.resolve(r))
-      .catch((e) => next.job.resolve({ status: 'ERROR', response: String(e.message || e) }))
+    Promise.resolve().then(job.fn)
+      .then((r) => job.resolve(r))
+      .catch((e) => job.resolve({ status: 'ERROR', response: String(e.message || e) }))
       .finally(() => { running--; pump(); });
   }
 }
-export function runQueued(slug, fn) {
-  return new Promise((resolve) => { (queues[slug] = queues[slug] || []).push({ fn, resolve }); pump(); });
+export function runQueued(slug, fn, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) { resolve(cancelledResult()); return; }
+    const job = { slug, fn, resolve, signal };
+    signal?.addEventListener('abort', () => {
+      const i = queue.indexOf(job);
+      if (i >= 0) { queue.splice(i, 1); resolve(cancelledResult()); }
+    }, { once: true });
+    queue.push(job);
+    pump();
+  });
 }
 export const runningCount = () => running;
+export const queuedCount = () => queue.length;
+export const isQueueFull = () => running >= MAX_PARALLEL;
 
-// ---------- models & quota (via sandbox) ----------
+// ---------- models & quota (via sandbox, async — tidak memblokir event loop) ----------
+async function execAgyDefault(args, timeout) {
+  const container = await ensureSandbox('default');
+  return new Promise((resolve) => {
+    execFile('docker', ['exec', '-i', '-w', '/home/AntiGPT', container, AGY_BIN_IN_SANDBOX, ...args],
+      { encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout) => resolve({ ok: !err, stdout: stdout || '' }));
+  });
+}
 export async function listModels() {
-  let container;
-  try { container = await ensureSandbox('default'); }
+  let r;
+  try { r = await execAgyDefault(['models'], 60000); }
   catch (e) { console.error('[agy] listModels: sandbox gagal disiapkan:', e.message); return []; }
-  const r = spawnSync('docker', ['exec', '-i', '-w', '/home/AntiGPT', container, AGY_BIN_IN_SANDBOX, 'models'],
-    { encoding: 'utf8', timeout: 60000 });
-  return (r.stdout || '').split('\n').filter((l) => l.includes('\t')).map((l) => {
+  return r.stdout.split('\n').filter((l) => l.includes('\t')).map((l) => {
     const [id, ...rest] = l.split('\t');
     return { id: id.trim(), name: rest.join(' ').trim() || id.trim() };
   });
 }
 export async function getQuota() {
-  let container;
-  try { container = await ensureSandbox('default'); }
+  let r;
+  try { r = await execAgyDefault(['-p', '/usage', '--output-format', 'json'], 90000); }
   catch (e) { console.error('[agy] getQuota: sandbox gagal disiapkan:', e.message); return null; }
-  const r = spawnSync('docker', ['exec', '-i', '-w', '/home/AntiGPT', container, AGY_BIN_IN_SANDBOX, '-p', '/usage', '--output-format', 'json'],
-    { encoding: 'utf8', timeout: 90000 });
-  if (r.status === 0 && r.stdout) {
+  if (r.ok && r.stdout) {
     try { const g = JSON.parse(r.stdout)?.command?.data?.groups; if (Array.isArray(g)) return g; } catch {}
   }
   return null;

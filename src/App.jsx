@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import Header from './components/Header';
 import Welcome from './components/Welcome';
@@ -9,26 +9,53 @@ import AttachSheet from './components/AttachSheet';
 import ModelSheet from './components/ModelSheet';
 import SettingsSheet from './components/SettingsSheet';
 import AccountSheet from './components/AccountSheet';
+import AuthGate from './components/AuthGate';
 import { useChats } from './hooks/useChats';
-import { sendToAIStream, apiStatus } from './services/ai';
+import {
+  apiStatus, authCheck, AUTH_EVENT, startChatStream, resumeChatStream, formatDone,
+  stopChat as apiStopChat, deleteChatOnServer, cachedModels, loadModels,
+} from './services/ai';
 import { MODELS, DEFAULT_MODEL } from './data/models';
 
 const USER_NAME = 'Xixi';
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  const t = setTimeout(resolve, ms);
+  signal?.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
+});
 
 export default function App() {
-  const { chats, createChat, addMessage, updateLastMessage, togglePin, renameChat, deleteChat } = useChats();
+  const { chats, createChat, addMessage, updateLastMessage, togglePin, renameChat, setChatModel, deleteChat } = useChats();
+  const [authed, setAuthed] = useState(null); // null = cek, false = minta token, true = boleh
   const [activeId, setActiveId] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sheet, setSheet] = useState(null); // 'attach' | 'model' | null
+  // model default untuk chat BARU (= model terakhir yang dipilih)
   const [model, setModel] = useState(() => localStorage.getItem('model') || DEFAULT_MODEL);
+  const [models, setModels] = useState(() => cachedModels()?.list || MODELS);
   const [attachments, setAttachments] = useState([]);
-  const [loading, setLoading] = useState(false);
+  // status proses per chat (bukan global), supaya tombol stop tidak ikut ke chat lain
+  const [loadingIds, setLoadingIds] = useState(() => new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [account, setAccount] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'system');
   const [font, setFont] = useState(() => localStorage.getItem('font') || 'Default');
-  const abortRef = useRef(null);
+  const abortRef = useRef(new Map()); // chatId -> AbortController (koneksi stream di browser)
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  const setChatLoading = (id, on) => setLoadingIds(prev => {
+    const next = new Set(prev);
+    if (on) next.add(id); else next.delete(id);
+    return next;
+  });
+
+  // ---- auth ----
+  useEffect(() => {
+    authCheck().then(r => setAuthed(!!r.authed)).catch(() => setAuthed(false));
+    const onAuth = () => setAuthed(false);
+    window.addEventListener(AUTH_EVENT, onAuth);
+    return () => window.removeEventListener(AUTH_EVENT, onAuth);
+  }, []);
 
   // Terapkan tema ke <html>
   useEffect(() => {
@@ -46,18 +73,41 @@ export default function App() {
 
   // status backend/akun agy
   useEffect(() => {
-    apiStatus().then(setAccount).catch(() => {});
-  }, [accountOpen]);
+    if (authed) apiStatus().then(setAccount).catch(() => {});
+  }, [accountOpen, authed]);
+
+  // daftar model: dari cache sessionStorage, diambil ulang kalau kadaluarsa / akun berganti
+  const refreshModels = useCallback((force = false) => {
+    loadModels({ email: account?.email ?? undefined, force })
+      .then(list => { if (list?.length) setModels(list); })
+      .catch(() => {});
+  }, [account?.email]);
+  useEffect(() => { if (authed) refreshModels(); }, [authed, refreshModels]);
 
   const active = chats.find(c => c.id === activeId);
-  const modelName = MODELS.find(m => m.id === model)?.name || model;
+  const chatModel = active?.model || model; // model per chat
+  const modelName = models.find(m => m.id === chatModel)?.name
+    || MODELS.find(m => m.id === chatModel)?.name || chatModel;
   useEffect(() => { localStorage.setItem('model', model); }, [model]);
+
+  const changeModel = (id) => {
+    setModel(id);
+    if (active) setChatModel(active.id, id);
+  };
+
+  // ---- stop: hentikan job di server + putus stream di browser ----
+  const stopChat = (id) => {
+    if (!id) return;
+    apiStopChat(id).catch(() => {});
+    abortRef.current.get(id)?.abort();
+  };
 
   useEffect(() => {
     const onKeyDown = (event) => {
-      if (event.key === 'Escape' && abortRef.current) {
+      const id = activeIdRef.current;
+      if (event.key === 'Escape' && id && abortRef.current.has(id)) {
         event.preventDefault();
-        abortRef.current.abort();
+        stopChat(id);
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -66,53 +116,121 @@ export default function App() {
 
   const newChat = () => { setActiveId(null); setDrawerOpen(false); };
 
+  // Ikuti job chat di server sampai `done`. Koneksi putus → sambung ulang otomatis (replay dari seq terakhir).
+  // open(signal, onEvent) = request pertama (POST mulai job, atau GET resume).
+  async function followJob(id, open, { resetOnFirstEvent = false } = {}) {
+    setChatLoading(id, true);
+    const controller = new AbortController();
+    const { signal } = controller;
+    abortRef.current.set(id, controller);
+    const upd = (fn) => updateLastMessage(id, m => (m.role === 'assistant' ? { ...m, ...fn(m) } : m));
+    const t0 = Date.now();
+    let lastSeq = -1;
+    let needReset = resetOnFirstEvent;
+
+    const onEvent = (ev) => {
+      if (typeof ev.seq === 'number') {
+        if (ev.seq <= lastSeq) return; // event duplikat saat replay
+        lastSeq = ev.seq;
+      }
+      if (needReset) { needReset = false; upd(() => ({ content: '', steps: [] })); }
+      if (ev.type === 'queued') upd(() => ({ status: 'Menunggu antrean…' }));
+      else if (ev.type === 'start') upd(() => ({ status: 'Berpikir…' }));
+      else if (ev.type === 'step') upd(m => {
+        const steps = (m.steps || []).slice();
+        const k = steps.findIndex(s => s.id === ev.step.id);
+        if (k >= 0) steps[k] = { ...steps[k], ...ev.step }; else steps.push(ev.step);
+        const st = ev.step.status === 'running' ? ev.step.label : 'Berpikir…';
+        return { steps, status: st };
+      });
+      else if (ev.type === 'delta') upd(m => ({ content: (m.content || '') + ev.text, status: 'Menulis jawaban…' }));
+    };
+
+    const markCancelled = () => upd(m => ({
+      content: m.content ? m.content + '\n\n⏹️ Proses dibatalkan.' : '⏹️ Proses dibatalkan.',
+      streaming: false, status: 'Dibatalkan', cancelled: true,
+      durationSec: m.durationSec ?? Math.round((Date.now() - (m.startedAt || t0)) / 1000),
+    }));
+
+    try {
+      let res = await open(signal, onEvent);
+      let tries = 0;
+      while (!res.done && !res.none) {
+        if (++tries > 30) throw new Error('Koneksi terputus sebelum jawaban selesai');
+        upd(() => ({ status: 'Menyambung ulang…' }));
+        await sleep(Math.min(1000 * tries, 5000), signal);
+        const before = lastSeq;
+        try {
+          res = await resumeChatStream({ chatId: id, since: lastSeq + 1, signal }, onEvent);
+          if (lastSeq > before) tries = 0;
+        } catch (e) {
+          if (e.name === 'AbortError' || e.status === 401) throw e;
+          res = {};
+        }
+      }
+      if (res.none) {
+        upd(m => ({
+          content: m.content || 'Proses sebelumnya terputus. Kirim ulang pesan untuk melanjutkan.',
+          streaming: false, status: 'Proses terputus',
+        }));
+        return;
+      }
+      if (res.done.cancelled) { markCancelled(); return; }
+      const reply = formatDone(res.done);
+      upd(m => ({ content: reply.text, streaming: false, durationSec: reply.durationSec ?? Math.round((Date.now() - (m.startedAt || t0)) / 1000) }));
+    } catch (err) {
+      if (err.name === 'AbortError') markCancelled();
+      else upd(m => ({ content: (m.content ? m.content + '\n\n' : '') + 'Error: ' + err.message, streaming: false, durationSec: Math.round((Date.now() - (m.startedAt || t0)) / 1000) }));
+    } finally {
+      if (abortRef.current.get(id) === controller) abortRef.current.delete(id);
+      setChatLoading(id, false);
+    }
+  }
+
+  // Setelah refresh: sambung ulang ke job yang masih berjalan di server
+  const resumedRef = useRef(false);
+  useEffect(() => {
+    if (authed !== true || resumedRef.current) return;
+    resumedRef.current = true;
+    for (const c of chats) {
+      const last = c.messages[c.messages.length - 1];
+      if (last?.role === 'assistant' && last.streaming) {
+        updateLastMessage(c.id, m => ({ ...m, status: 'Menyambung ulang…' }));
+        followJob(c.id, (signal, onEvent) => resumeChatStream({ chatId: c.id, since: 0, signal }, onEvent), { resetOnFirstEvent: true });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed]);
+
   async function handleSend(input) {
     // ChatInput mengirim { text, files }; tetap dukung string biasa
     const text = typeof input === 'string' ? input : (input?.text ?? '');
     const files = input?.files || attachments;
-    if ((!text.trim() && !files.length) || loading) return;
+    if ((!text.trim() && !files.length) || (activeId && loadingIds.has(activeId))) return;
     setAttachments([]);
     const userMsg = { role: 'user', content: text, attachments: files.map(f => ({ name: f.name, type: f.type })) };
-    const history = [...(active?.messages ?? []), userMsg];
+    const useModel = active?.model || model;
 
     let id = activeId;
-    if (!id) { id = createChat(text); setActiveId(id); }
+    if (!id) { id = createChat(text, useModel); setActiveId(id); }
     addMessage(id, userMsg);
-
-    setLoading(true);
-    const controller = new AbortController();
-    abortRef.current = controller;
     // placeholder jawaban AI: diisi bertahap oleh stream (langkah proses + teks)
     addMessage(id, { role: 'assistant', content: '', steps: [], streaming: true, status: 'Menyiapkan…', startedAt: Date.now() });
-    const upd = (fn) => updateLastMessage(id, m => (m.role === 'assistant' ? { ...m, ...fn(m) } : m));
-    const t0 = Date.now();
-    try {
-      const reply = await sendToAIStream({ chatId: id, model, text, files, signal: controller.signal }, (ev) => {
-        if (ev.type === 'queued') upd(() => ({ status: 'Menunggu antrean…' }));
-        else if (ev.type === 'start') upd(() => ({ status: 'Berpikir…' }));
-        else if (ev.type === 'step') upd(m => {
-          const steps = m.steps.slice();
-          const k = steps.findIndex(s => s.id === ev.step.id);
-          if (k >= 0) steps[k] = { ...steps[k], ...ev.step }; else steps.push(ev.step);
-          const st = ev.step.status === 'running' ? ev.step.label : 'Berpikir…';
-          return { steps, status: st };
-        });
-        else if (ev.type === 'delta') upd(m => ({ content: m.content + ev.text, status: 'Menulis jawaban…' }));
-      });
-      upd(() => ({ content: reply.text, streaming: false, durationSec: reply.durationSec ?? Math.round((Date.now() - t0) / 1000) }));
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        upd(m => ({ content: m.content ? m.content + '\n\n⏹️ Proses dibatalkan.' : '⏹️ Proses dibatalkan.', streaming: false, status: 'Dibatalkan', cancelled: true, durationSec: Math.round((Date.now() - t0) / 1000) }));
-      } else {
-        upd(m => ({ content: (m.content ? m.content + '\n\n' : '') + 'Error: ' + err.message, streaming: false, durationSec: Math.round((Date.now() - t0) / 1000) }));
-      }
-    } finally {
-      if (abortRef.current === controller) abortRef.current = null;
-      setLoading(false);
-    }
+    await followJob(id, (signal, onEvent) => startChatStream({ chatId: id, model: useModel, text, files, signal }, onEvent));
   }
 
-  const handleStop = () => abortRef.current?.abort();
+  const handleDelete = (id) => {
+    abortRef.current.get(id)?.abort();
+    deleteChat(id);
+    if (id === activeId) setActiveId(null);
+    // hapus container sandbox + folder sesi di server
+    deleteChatOnServer(id).catch(() => {});
+  };
+
+  const loading = !!activeId && loadingIds.has(activeId);
+
+  if (authed === null) return <div className="app" />;
+  if (authed === false) return <AuthGate onSuccess={() => setAuthed(true)} />;
 
   return (
     <div className="app">
@@ -130,7 +248,7 @@ export default function App() {
           isNewChat={!active}
           modelName={modelName} attachments={attachments}
           onRemoveAttachment={(i) => setAttachments(a => a.filter((_, j) => j !== i))}
-          onSend={handleSend} onStop={handleStop} disabled={loading}
+          onSend={handleSend} onStop={() => stopChat(activeId)} disabled={loading}
           onOpenAttach={() => setSheet('attach')} onOpenModel={() => setSheet('model')}
         />
       </div>
@@ -140,7 +258,7 @@ export default function App() {
         onClose={() => setDrawerOpen(false)}
         onSelect={id => { setActiveId(id); setDrawerOpen(false); }}
         onNewChat={newChat} onTogglePin={togglePin} onRename={renameChat}
-        onDelete={id => { deleteChat(id); if (id === activeId) setActiveId(null); }}
+        onDelete={handleDelete}
         onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }}
         onOpenAccount={() => { setDrawerOpen(false); setAccountOpen(true); }}
         loggedIn={account?.loggedIn}
@@ -150,7 +268,7 @@ export default function App() {
         onPick={files => setAttachments(a => [...a, ...files])} />
 
       <ModelSheet open={sheet === 'model'} onClose={() => setSheet(null)}
-        model={model} onChangeModel={setModel} />
+        model={chatModel} list={models} onOpen={() => refreshModels(false)} onChangeModel={changeModel} />
 
       <SettingsSheet
         open={settingsOpen} onClose={() => setSettingsOpen(false)}

@@ -78,12 +78,34 @@ Variabel environment opsional:
 | `AGY_SANDBOX_CPUS` | `2.0` | Limit CPU container |
 | `AGY_SANDBOX_PIDS` | `512` | Limit jumlah proses |
 | `AGY_TOKEN_FILE` | `server/sandbox-data/gemini/antigravity-cli/antigravity-oauth-token` | Lokasi token OAuth |
+| `AGY_SANDBOX_IDLE_MIN` | `30` | Menit idle sebelum container chat di-`docker stop` (0 = nonaktif). Di-start lagi otomatis saat dipakai |
+| `AUTH_TOKEN` | — | Token akses web/API (lihat bagian Token akses) |
 | `PORT` | `3000` | Port server |
+
+Endpoint chat:
+
+- `POST /api/chat/stream` — mulai job (NDJSON). Job **tidak** berhenti kalau koneksi putus/refresh
+- `GET /api/chat/stream?chatId=<id>&since=<seq>` — sambung ulang & replay event job
+- `POST /api/chat/stop` `{ "chatId": "<id>" }` — hentikan proses agy chat tersebut
+- `DELETE /api/chats/<id>` — hapus chat: stop job, hapus container sandbox & folder sesi
 
 Endpoint sandbox:
 
 - `GET /api/sandbox/status?chatId=<id>` — status container chat
 - `POST /api/sandbox/reset` `{ "chatId": "<id>" }` — hapus container (dibuat ulang otomatis saat chat berikutnya)
+
+## Token akses (wajib)
+
+Semua endpoint `/api/*` dikunci token. Buat file `.env` di root proyek (contoh di `.env.example`):
+
+```bash
+AUTH_TOKEN=token-acak-yang-panjang
+```
+
+Saat membuka aplikasi, browser akan meminta token sekali, lalu disimpan sebagai cookie httpOnly
+(berlaku 1 tahun). Untuk script/curl pakai header `Authorization: Bearer <token>`.
+Jika `AUTH_TOKEN` kosong, server membuat token sementara (dicetak di log, berubah tiap restart).
+Salah token > 10x dalam 15 menit per IP → diblokir sementara.
 
 ## Login
 

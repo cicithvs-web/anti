@@ -1,5 +1,5 @@
-import { Children, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, Check, Clock, Copy, ChevronRight, Download, File, ImageOff } from 'lucide-react';
+import { Children, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Archive, ArrowDown, Check, Clock, Copy, ChevronRight, Download, File, ImageOff } from 'lucide-react';
 import ProcessSheet, { fmtDur } from './ProcessSheet';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -173,35 +173,88 @@ function ProcessRow({ m, onOpen }) {
   );
 }
 
+// Satu pesan. Di-memo: saat streaming hanya pesan terakhir (objeknya berubah) yang dirender ulang,
+// pesan lama tidak di-parse ulang oleh react-markdown.
+const MessageItem = memo(function MessageItem({ m, index, chatId, onOpen }) {
+  return (
+    <div className={'msg ' + (m.role === 'user' ? 'msg-user' : 'msg-ai')}>
+      {m.attachments?.length > 0 && (
+        <div className="attach-row">
+          {m.attachments.map((f, j) => <span key={j} className="chip">{f.name}</span>)}
+        </div>
+      )}
+      {m.role === 'assistant' && m.steps && <ProcessRow m={m} onOpen={() => onOpen(index)} />}
+      {(m.content || m.role === 'user') && (
+        m.role === 'user'
+          ? <div className="bubble">{m.content}</div>
+          : <div className="bubble md"><Markdown text={m.content} chatId={chatId} />{m.streaming && m.content ? <span className="caret" /> : null}</div>
+      )}
+    </div>
+  );
+});
+
+const NEAR_BOTTOM_PX = 80;
+
 export default function ChatView({ messages, chatId }) {
   const endRef = useRef(null);
+  const boxRef = useRef(null);
+  const stickRef = useRef(true);     // auto-scroll hanya kalau user memang di (dekat) bawah
+  const prevLenRef = useRef(messages.length);
+  const [atBottom, setAtBottom] = useState(true);
   const [openIdx, setOpenIdx] = useState(null);
+  const getBox = () => boxRef.current || (boxRef.current = endRef.current?.closest('.content') || null);
 
   useEffect(() => {
-    // Scroll HANYA container chat (bukan seluruh halaman)
-    const box = endRef.current?.closest('.content');
-    if (box) box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
+    const box = getBox();
+    if (!box) return;
+    const onScroll = () => {
+      const near = box.scrollHeight - box.scrollTop - box.clientHeight < NEAR_BOTTOM_PX;
+      stickRef.current = near;
+      setAtBottom(near);
+    };
+    box.addEventListener('scroll', onScroll, { passive: true });
+    return () => box.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // Pindah chat → selalu mulai dari bawah
+  useLayoutEffect(() => {
+    const box = getBox();
+    stickRef.current = true;
+    setAtBottom(true);
+    setOpenIdx(null);
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [chatId]);
+
+  useLayoutEffect(() => {
+    const box = getBox();
+    // pesan baru dari user → paksa ikut ke bawah
+    const added = messages.slice(prevLenRef.current);
+    prevLenRef.current = messages.length;
+    if (added.some(m => m.role === 'user')) stickRef.current = true;
+    if (box && stickRef.current) box.scrollTop = box.scrollHeight; // instan (tanpa smooth) supaya tidak patah-patah
     if (window.scrollY) window.scrollTo(0, 0);
   }, [messages]);
+
+  const scrollToBottom = () => {
+    const box = getBox();
+    if (!box) return;
+    stickRef.current = true;
+    box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
+  };
 
   return (
     <div className="chat-view">
       {messages.map((m, i) => (
-        <div key={i} className={'msg ' + (m.role === 'user' ? 'msg-user' : 'msg-ai')}>
-          {m.attachments?.length > 0 && (
-            <div className="attach-row">
-              {m.attachments.map((f, j) => <span key={j} className="chip">{f.name}</span>)}
-            </div>
-          )}
-          {m.role === 'assistant' && m.steps && <ProcessRow m={m} onOpen={() => setOpenIdx(i)} />}
-          {(m.content || m.role === 'user') && (
-            m.role === 'user'
-              ? <div className="bubble">{m.content}</div>
-              : <div className="bubble md"><Markdown text={m.content} chatId={chatId} />{m.streaming && m.content ? <span className="caret" /> : null}</div>
-          )}
-        </div>
+        <MessageItem key={m.id ?? i} m={m} index={i} chatId={chatId} onOpen={setOpenIdx} />
       ))}
       <div ref={endRef} />
+      {!atBottom && (
+        <div className="scroll-bottom-wrap">
+          <button type="button" className="scroll-bottom" onClick={scrollToBottom} aria-label="Ke pesan terbaru">
+            <ArrowDown size={18} />
+          </button>
+        </div>
+      )}
       <ProcessSheet open={openIdx != null} msg={openIdx != null ? messages[openIdx] : null} onClose={() => setOpenIdx(null)} />
     </div>
   );

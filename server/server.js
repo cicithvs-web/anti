@@ -5,11 +5,17 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'url';
-import * as agy from './agy.js';
-import * as agySandbox from './sandboxManager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Muat .env dari root proyek (Node >= 20.12). Variabel yang sudah di-set di environment tetap menang.
+try { process.loadEnvFile(path.join(__dirname, '../.env')); } catch {}
+
+const agy = await import('./agy.js');
+const agySandbox = await import('./sandboxManager.js');
+const jobs = await import('./jobs.js');
+
 const app = express();
+app.set('trust proxy', true); // supaya req.secure / req.ip benar di belakang nginx / tunnel
 app.use(express.json({ limit: '2mb' }));
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -19,6 +25,65 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 
 // ---------- HEALTH ----------
 app.get('/health', (req, res) => res.status(200).json({ ok: true, service: 'antigpt' }));
+
+// ---------- AUTH (token di .env) ----------
+// Browser: POST /api/auth {token} → cookie httpOnly. Script/curl: header `Authorization: Bearer <token>`.
+let AUTH_TOKEN = String(process.env.AUTH_TOKEN || '').trim();
+if (!AUTH_TOKEN) {
+  AUTH_TOKEN = crypto.randomBytes(24).toString('base64url');
+  console.warn('[auth] ⚠️  AUTH_TOKEN belum di-set di .env — memakai token sementara (berubah tiap restart):');
+  console.warn(`[auth]     ${AUTH_TOKEN}`);
+}
+const AUTH_COOKIE = 'antigpt_auth';
+const cookieValue = crypto.createHmac('sha256', AUTH_TOKEN).update('antigpt-cookie-v1').digest('base64url');
+const safeEqual = (a, b) => {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+};
+function readCookie(req, name) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return null;
+}
+function isAuthed(req) {
+  const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '')?.[1];
+  if (bearer && safeEqual(bearer.trim(), AUTH_TOKEN)) return true;
+  const c = readCookie(req, AUTH_COOKIE);
+  return !!c && safeEqual(c, cookieValue);
+}
+function setAuthCookie(req, res, value, maxAge) {
+  const secure = req.secure ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`);
+}
+// rate limit percobaan token salah: 10x / 15 menit per IP
+const authFails = new Map();
+const FAIL_WINDOW = 15 * 60 * 1000, FAIL_MAX = 10;
+app.get('/api/auth', (req, res) => res.json({ ok: true, authed: isAuthed(req) }));
+app.post('/api/auth', (req, res) => {
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  const rec = authFails.get(ip);
+  if (rec && now - rec.first > FAIL_WINDOW) authFails.delete(ip);
+  const cur = authFails.get(ip);
+  if (cur && cur.count >= FAIL_MAX) {
+    return res.status(429).json({ ok: false, error: 'Terlalu banyak percobaan. Coba lagi nanti.' });
+  }
+  if (!safeEqual(String(req.body?.token || '').trim(), AUTH_TOKEN)) {
+    authFails.set(ip, cur ? { ...cur, count: cur.count + 1 } : { first: now, count: 1 });
+    return setTimeout(() => res.status(401).json({ ok: false, error: 'Token salah.' }), 600);
+  }
+  authFails.delete(ip);
+  setAuthCookie(req, res, cookieValue, 60 * 60 * 24 * 365);
+  res.json({ ok: true, authed: true });
+});
+app.post('/api/auth/logout', (req, res) => { setAuthCookie(req, res, '', 0); res.json({ ok: true }); });
+// Semua /api/* lain wajib terautentikasi
+app.use('/api', (req, res, next) => {
+  if (isAuthed(req)) return next();
+  res.status(401).json({ ok: false, auth: false, error: 'Unauthorized' });
+});
 
 function safeName(name) {
   return String(name || 'attachment').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'attachment';
@@ -219,7 +284,7 @@ app.get('/api/status', (req, res) => {
     loggedIn: !!agy.whoamiEmail(),
     running: agy.runningCount(),
     maxParallel: agy.MAX_PARALLEL,
-    queued: Object.values(agy.queues).reduce((a, q) => a + q.length, 0),
+    queued: agy.queuedCount(),
     login: agy.getLoginState(),
   });
 });
@@ -240,9 +305,10 @@ app.get('/api/models', async (req, res) => {
 // body: { chatId, title, text, model }
 app.post('/api/chat', upload.array('files', 5), async (req, res) => {
   const { chatId, text, model } = req.body || {};
-  const files = persistUploads(chatId, req.files);
-  if ((!text || !String(text).trim()) && !files.length) return res.status(400).json({ ok: false, error: 'teks atau file kosong' });
+  // validasi & cek login DULU, baru simpan upload (hindari file yatim)
+  if ((!text || !String(text).trim()) && !req.files?.length) return res.status(400).json({ ok: false, error: 'teks atau file kosong' });
   if (!agy.whoamiEmail()) return res.json({ ok: false, needLogin: true, error: 'Belum login. Buka menu Akun → Login dengan Google.' });
+  const files = persistUploads(chatId, req.files);
 
   const slug = agy.slugify(chatId || 'default');
   agy.topicDir(slug);
@@ -293,29 +359,35 @@ function toolLabel(name, p = {}) {
 const toolKind = (n) => /command|terminal/.test(n) ? 'terminal' : /write|edit|replace/.test(n) ? 'edit'
   : /read|view|list|grep|find|search_file/.test(n) ? 'read' : /web|url|browser/.test(n) ? 'web' : 'tool';
 
-app.post('/api/chat/stream', upload.array('files', 5), async (req, res) => {
-  const { chatId, text, model } = req.body || {};
-  const files = persistUploads(chatId, req.files);
+// Respons NDJSON: replay event job mulai `since`, lalu ikuti event baru sampai `done`.
+// Putusnya koneksi TIDAK membatalkan job — klien bisa menyambung lagi lewat GET /api/chat/stream.
+function pipeJob(job, since, req, res) {
   res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
   const send = (o) => { try { res.write(JSON.stringify(o) + '\n'); } catch {} };
-  if ((!text || !String(text).trim()) && !files.length) { send({ type: 'done', ok: false, answer: 'Error: teks atau file kosong' }); return res.end(); }
-  if (!agy.whoamiEmail()) { send({ type: 'done', ok: false, needLogin: true, answer: 'Belum login. Buka menu Akun → Login dengan Google.' }); return res.end(); }
-
-  const slug = agy.slugify(chatId || 'default');
-  agy.topicDir(slug);
-  const st = agy.readState(slug);
-  if (model) st.model = model;
-  if (!st.model) st.model = agy.DEFAULT_MODEL;
-  agy.writeState(slug, st);
-
-  const ac = new AbortController();
-  res.on('close', () => { if (!res.writableFinished) ac.abort(); });
   const ping = setInterval(() => send({ type: 'ping' }), 15000); // jaga koneksi tunnel tetap hidup
-  if (agy.runningCount() >= agy.MAX_PARALLEL) send({ type: 'queued' });
+  let unsub = () => {};
+  let ended = false;
+  const finish = () => {
+    if (ended) return;
+    ended = true;
+    clearInterval(ping);
+    unsub();
+    try { res.end(); } catch {}
+  };
+  res.on('close', () => { ended = true; clearInterval(ping); unsub(); });
+  unsub = job.subscribe(since, (ev) => { send(ev); if (ev.type === 'done') finish(); });
+  if (job.done) finish();
+}
+function ndjsonOnce(res, obj) {
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.end(JSON.stringify(obj) + '\n');
+}
 
+async function runChatJob(job, slug, prompt, st) {
   const started = Date.now();
   let answerStep = null;
   const onEvent = (ev) => {
@@ -324,39 +396,96 @@ app.post('/api/chat/stream', upload.array('files', 5), async (req, res) => {
     const idx = su.step_index;
     if (su.step_type === 'tool') {
       const p = su.tool_info?.parameters || {};
-      send({ type: 'step', step: {
+      job.emit({ type: 'step', step: {
         id: idx, kind: toolKind(su.tool_name || ''), tool: su.tool_name, label: toolLabel(su.tool_name || 'tool', p),
         status: su.state === 'DONE' ? 'done' : 'running',
         duration: su.duration_seconds ?? null,
         output: su.tool_info?.output ? String(su.tool_info.output).slice(0, 1500) : null,
       } });
     } else if (su.step_type === 'agent_response') {
-      if (su.text_delta) { answerStep = idx; send({ type: 'delta', text: su.text_delta }); }
+      if (su.text_delta) { answerStep = idx; job.emit({ type: 'delta', text: su.text_delta }); }
       else if (su.state === 'DONE' && idx !== answerStep) {
         // langkah "mikir" sebelum memakai tool (agy tidak membuka teks thinking-nya, hanya durasi & token)
-        send({ type: 'step', step: { id: idx, kind: 'think', label: 'Berpikir', status: 'done',
+        job.emit({ type: 'step', step: { id: idx, kind: 'think', label: 'Berpikir', status: 'done',
           duration: su.duration_seconds ?? null, thinkingTokens: su.usage?.thinking_tokens ?? null } });
       }
     }
   };
 
-  const r = await agy.runQueued(slug, () => {
-    send({ type: 'start' });
-    return agy.agyPromptStream(slug, promptWithAttachments(text, files), st.model, st.conversation_id, onEvent, ac.signal);
-  });
-  clearInterval(ping);
-  const raw = r.raw_output || r.response || '';
-  if (r.conversation_id) st.conversation_id = r.conversation_id;
-  if (r.usage) { st.last_usage = r.usage; st.last_model = st.model; st.last_ts = Date.now(); }
+  try {
+    if (agy.isQueueFull()) job.emit({ type: 'queued' });
+    const signal = job.controller.signal;
+    const r = await agy.runQueued(slug, () => {
+      job.emit({ type: 'start' });
+      return agy.agyPromptStream(slug, prompt, st.model, st.conversation_id, onEvent, signal);
+    }, signal);
+    const raw = r.raw_output || r.response || '';
+    if (r.conversation_id) st.conversation_id = r.conversation_id;
+    if (r.usage) { st.last_usage = r.usage; st.last_model = st.model; st.last_ts = Date.now(); }
+    agy.writeState(slug, st);
+    const cancelled = signal.aborted || r.status === 'CANCELLED';
+    const lim = cancelled ? null : (r.limitDetected || null);
+    job.emit({
+      type: 'done', ok: !cancelled && r.status === 'SUCCESS', cancelled,
+      answer: cancelled ? '' : (r.response || ''), model: st.model, usage: r.usage || null,
+      durationSec: Math.round((Date.now() - started) / 1000),
+      limit: lim ? { ...lim, resetIn: agy.extractResetIn(raw) } : null,
+      needLogin: !cancelled && (!!agy.extractLoginUrl(raw) || /not (logged|signed) in|login required|unauthenticated/i.test(raw)),
+    });
+  } catch (e) {
+    job.emit({ type: 'done', ok: false, answer: `Error: ${e.message || e}`, durationSec: Math.round((Date.now() - started) / 1000) });
+  }
+}
+
+// Mulai job baru untuk chat ini, lalu stream event-nya.
+app.post('/api/chat/stream', upload.array('files', 5), async (req, res) => {
+  const { chatId, text, model } = req.body || {};
+  // validasi & cek login DULU, baru simpan upload (hindari file yatim)
+  if ((!text || !String(text).trim()) && !req.files?.length) return ndjsonOnce(res, { type: 'done', ok: false, answer: 'Error: teks atau file kosong' });
+  if (!agy.whoamiEmail()) return ndjsonOnce(res, { type: 'done', ok: false, needLogin: true, answer: 'Belum login. Buka menu Akun → Login dengan Google.' });
+
+  const slug = agy.slugify(chatId || 'default');
+  if (jobs.isJobRunning(slug)) return ndjsonOnce(res, { type: 'done', ok: false, busy: true, answer: 'Chat ini masih memproses pesan sebelumnya.' });
+
+  const files = persistUploads(chatId, req.files);
+  agy.topicDir(slug);
+  const st = agy.readState(slug);
+  if (model) st.model = model;
+  if (!st.model) st.model = agy.DEFAULT_MODEL;
   agy.writeState(slug, st);
-  const lim = r.limitDetected || null;
-  send({
-    type: 'done', ok: r.status === 'SUCCESS', answer: r.response || '', model: st.model, usage: r.usage || null,
-    durationSec: Math.round((Date.now() - started) / 1000),
-    limit: lim ? { ...lim, resetIn: agy.extractResetIn(raw) } : null,
-    needLogin: !!agy.extractLoginUrl(raw) || /not (logged|signed) in|login required|unauthenticated/i.test(raw),
-  });
-  res.end();
+
+  const job = jobs.createJob(slug);
+  runChatJob(job, slug, promptWithAttachments(text, files), st); // sengaja tidak di-await
+  pipeJob(job, 0, req, res);
+});
+
+// Sambung ulang ke job yang sedang/baru selesai berjalan: GET /api/chat/stream?chatId=..&since=<seq>
+// Kalau tidak ada job (mis. server restart) → {type:'none'}.
+app.get('/api/chat/stream', (req, res) => {
+  const slug = agy.slugify(req.query.chatId || 'default');
+  const job = jobs.getJob(slug);
+  if (!job) return ndjsonOnce(res, { type: 'none' });
+  pipeJob(job, parseInt(req.query.since, 10) || 0, req, res);
+});
+
+// Hentikan proses agy chat ini (eksplisit — tidak lagi bergantung pada putusnya koneksi)
+app.post('/api/chat/stop', (req, res) => {
+  const slug = agy.slugify(req.body?.chatId || 'default');
+  res.json({ ok: true, stopped: jobs.stopJob(slug) });
+});
+
+// Hapus chat sepenuhnya: hentikan job, hapus container sandbox & folder sesi
+app.delete('/api/chats/:chatId', async (req, res) => {
+  const slug = agy.slugify(req.params.chatId);
+  if (!slug || slug === 'default') return res.status(400).json({ ok: false, error: 'chatId tidak valid' });
+  jobs.deleteJob(slug);
+  const removed = await agySandbox.resetSandbox(slug);
+  const dir = path.resolve(agy.BASE, slug);
+  let deletedDir = false;
+  if (dir.startsWith(path.resolve(agy.BASE) + path.sep)) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); deletedDir = true; } catch (e) { console.warn('[delete]', slug, e.message); }
+  }
+  res.json({ ok: true, slug, containerRemoved: removed, sessionDeleted: deletedDir });
 });
 
 // reset percakapan 1 chat (hapus conversation_id)
@@ -366,11 +495,26 @@ app.post('/api/chat/reset', (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- QUOTA (/usage asli dari CLI) ----------
+// ---------- QUOTA (/usage asli dari CLI) — di-cache 60 dtk per akun ----------
+let quotaCache = { email: null, at: 0, groups: null, pending: null };
 app.get('/api/quota', async (req, res) => {
-  if (!agy.whoamiEmail()) return res.json({ ok: false, needLogin: true });
-  const groups = await agy.getQuota();
-  res.json({ ok: !!groups, groups: groups || [] });
+  const email = agy.whoamiEmail();
+  if (!email) return res.json({ ok: false, needLogin: true });
+  const fresh = quotaCache.email === email && quotaCache.groups && Date.now() - quotaCache.at < 60_000;
+  if (!fresh || req.query.refresh) {
+    // dedupe: request bersamaan cukup menunggu 1 eksekusi agy
+    if (!quotaCache.pending || quotaCache.email !== email) {
+      quotaCache.email = email;
+      quotaCache.pending = agy.getQuota().then((groups) => {
+        if (groups) quotaCache = { email, at: Date.now(), groups, pending: null };
+        else quotaCache.pending = null;
+        return groups;
+      });
+    }
+    const groups = await quotaCache.pending;
+    return res.json({ ok: !!groups, groups: groups || [] });
+  }
+  res.json({ ok: true, groups: quotaCache.groups, cached: true });
 });
 
 // ---------- LOGIN / LOGOUT ----------
@@ -398,4 +542,13 @@ const dist = path.join(__dirname, '../dist');
 app.use(express.static(dist));
 app.get(/^\/(?!api\/|health$).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));
 
-app.listen(PORT, '0.0.0.0', () => console.log(`[server] AntiGPT + agybot logic di port ${PORT} | sandbox=${agy.SANDBOX_IMAGE} (agy dieksekusi di Docker)`));
+// ---------- REAPER: stop container sandbox yang idle ----------
+const IDLE_MIN = parseFloat(process.env.AGY_SANDBOX_IDLE_MIN || '30');
+if (IDLE_MIN > 0) {
+  agySandbox.startIdleReaper({
+    idleMs: IDLE_MIN * 60 * 1000,
+    isBusy: (slug) => jobs.isJobRunning(slug) || (slug === 'default' && !!agy.getLoginState()),
+  });
+}
+
+app.listen(PORT, '0.0.0.0', () => console.log(`[server] AntiGPT + agybot logic di port ${PORT} | sandbox=${agy.SANDBOX_IMAGE} (agy dieksekusi di Docker) | auth=${process.env.AUTH_TOKEN ? '.env' : 'token sementara'} | idle-stop=${IDLE_MIN} mnt`));

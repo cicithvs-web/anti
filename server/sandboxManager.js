@@ -111,9 +111,12 @@ async function ensureAntigravity(containerName) {
    sudah jalan → langsung pakai; berhenti → start; belum ada → buat baru.
  */
 const sandboxPending = new Map(); // slug → Promise (hindari `docker run --name` ganda)
+const lastUsed = new Map(); // slug aman → timestamp terakhir dipakai (untuk reaper idle)
+export const touchSandbox = (slug) => lastUsed.set(slugSafe(slug), Date.now());
 
 export function ensureSandbox(slug) {
   const safe = slugSafe(slug);
+  touchSandbox(safe);
   if (!sandboxPending.has(safe)) {
     sandboxPending.set(safe, ensureSandboxOnce(safe).finally(() => sandboxPending.delete(safe)));
   }
@@ -136,7 +139,8 @@ async function ensureSandboxOnce(slug) {
     await execFileP('docker', ['run', '-d',
       '--init',
       '--name', containerName,
-      '--restart', 'unless-stopped',
+      // tidak auto-restart: container di-start on-demand oleh ensureSandbox & di-stop reaper saat idle
+      '--restart', 'no',
       '--memory', MEMORY,
       '--cpus', CPUS,
       '--pids-limit', PIDS,
@@ -160,6 +164,8 @@ export async function spawnInSandbox(slug, argv, { timeoutMs, onTimeout } = {}) 
   const child = spawn('docker', ['exec', '-i', '-w', SANDBOX_HOME, containerName, ...argv], {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  touchSandbox(slug);
+  child.on('close', () => touchSandbox(slug));
   if (timeoutMs) {
     const timer = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch {}
@@ -191,8 +197,46 @@ export function killAgy(slug) {
 }
 
 export async function resetSandbox(slug) {
+  lastUsed.delete(slugSafe(slug));
   try { await execFileP('docker', ['rm', '-f', getSafeContainerName(slug)], { stdio: ['pipe', 'pipe', 'pipe'] }); return true; }
   catch { return false; }
+}
+
+/**
+ * Reaper: stop container sandbox yang idle (tidak dipakai > idleMs).
+ * Container yang di-stop akan di-start lagi otomatis oleh ensureSandbox saat dibutuhkan.
+ * isBusy(slug) → true kalau slug sedang dipakai (job berjalan / login), jangan di-stop.
+ */
+const CONTAINER_PREFIX = 'antigpt-sandbox-';
+export function startIdleReaper({ idleMs, intervalMs = 5 * 60 * 1000, isBusy } = {}) {
+  const migrated = new Set();
+  const tick = async () => {
+    let stdout = '';
+    try {
+      ({ stdout } = await execFileP('docker', ['ps', '--filter', `name=^${CONTAINER_PREFIX}`, '--format', '{{.Names}}'],
+        { stdio: ['pipe', 'pipe', 'pipe'], timeout: 30_000 }));
+    } catch { return; }
+    const now = Date.now();
+    for (const name of stdout.split('\n').map((s) => s.trim()).filter((s) => s.startsWith(CONTAINER_PREFIX))) {
+      const slug = name.slice(CONTAINER_PREFIX.length);
+      if (!migrated.has(name)) {
+        // container lama dibuat dengan --restart unless-stopped → matikan auto-restart-nya
+        migrated.add(name);
+        execFileP('docker', ['update', '--restart', 'no', name], { stdio: ['pipe', 'pipe', 'pipe'] }).catch(() => {});
+      }
+      if (!lastUsed.has(slug)) { lastUsed.set(slug, now); continue; } // belum tercatat (mis. server baru restart): beri masa tenggang
+      if (isBusy?.(slug)) { lastUsed.set(slug, now); continue; }
+      if (now - lastUsed.get(slug) < idleMs) continue;
+      if (sandboxPending.has(slug)) continue;
+      lastUsed.delete(slug);
+      console.log(`[Sandbox Reaper] stop ${name} (idle > ${Math.round(idleMs / 60000)} mnt)`);
+      execFileP('docker', ['stop', '-t', '3', name], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 }).catch(() => {});
+    }
+  };
+  const timer = setInterval(tick, intervalMs);
+  timer.unref?.();
+  setTimeout(tick, 15_000).unref?.();
+  return timer;
 }
 
 export async function getSandboxInfo(slug) {

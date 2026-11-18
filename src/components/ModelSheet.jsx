@@ -1,16 +1,11 @@
 import { Check } from 'lucide-react';
 import BottomSheet from './BottomSheet';
-import { useEffect, useState } from 'react';
-import { MODELS } from '../data/models';
-import { getModels } from '../services/ai';
+import { useEffect } from 'react';
 import RippleButton from './RippleButton.jsx';
 
-export default function ModelSheet({ open, onClose, model, onChangeModel }) {
-  const [list, setList] = useState(MODELS);
-  useEffect(() => {
-    if (!open) return;
-    getModels().then(r => { if (r.models?.length) setList(r.models.map(m => ({ id: m.id, name: m.name, desc: m.id }))); }).catch(() => {});
-  }, [open]);
+// Daftar model dipegang App (di-cache di sessionStorage); onOpen hanya memicu refresh kalau cache kadaluarsa.
+export default function ModelSheet({ open, onClose, model, list, onOpen, onChangeModel }) {
+  useEffect(() => { if (open) onOpen?.(); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <BottomSheet open={open} title="Model" onClose={onClose}>
       <div className="card-list">
