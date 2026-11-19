@@ -342,3 +342,33 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .img-editor-tools { display: flex; align-items: center; gap: 12px; }
 .img-editor-tool { flex: none; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 50%; background: rgba(255,255,255,.12); color: #fff; }
 .img-editor-zoom { flex: 1; accent-color: var(--accent); }
+
+/* Lampiran di composer: thumbnail gambar seragam + kartu file, satu baris geser ke samping */
+.att-tray { display: flex; gap: 8px; margin-bottom: 8px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; padding-top: 6px; }
+.att-tray::-webkit-scrollbar { display: none; }
+.att-thumb { position: relative; flex: none; width: 64px; height: 64px; }
+.att-thumb-open { display: block; width: 100%; height: 100%; border-radius: 12px; overflow: hidden; background: var(--panel); }
+.att-thumb-open img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.att-thumb-remove { position: absolute; top: -6px; right: -6px; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: var(--text); color: var(--bg); box-shadow: 0 0 0 2px var(--surface); }
+.att-card { flex: none; width: 180px; height: 64px; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 10px; border-radius: 12px; background: var(--panel); }
+.att-card-icon { flex: none; width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; background: var(--surface); color: var(--accent); }
+.att-card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.att-card-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-card-meta { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.att-card-remove { flex: none; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); }
+
+/* Lightbox gambar lampiran */
+.lightbox { position: fixed; inset: 0; z-index: 110; display: flex; flex-direction: column; background: rgba(0,0,0,.92); color: #fff; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); opacity: 0; animation: dialog-fade-in .2s ease forwards; }
+.lightbox .icon-btn { color: #fff; }
+.lightbox-top { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
+.lightbox-name { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lightbox-edit { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 999px; background: rgba(255,255,255,.14); color: #fff; font-size: 14px; font-weight: 600; }
+.lightbox-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 8px 12px 16px; }
+.lightbox-stage img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+
+/* Lampiran di pesan terkirim (di dalam gelembung user) */
+.att-tray-sent { flex-wrap: wrap; overflow: visible; padding-top: 0; }
+.msg-user .att-tray-sent:only-child { margin-bottom: 0; }
+.att-thumb-sent { width: 80px; height: 80px; }
+.msg-user .att-card { background: var(--surface); }
+.msg-user .att-card-icon { background: var(--surface-2); }

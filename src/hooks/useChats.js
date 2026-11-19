@@ -84,10 +84,19 @@ export function useChats() {
       ms[ms.length - 1] = fn(ms[ms.length - 1]);
       return { ...c, messages: ms, updatedAt: Date.now() };
     });
+  // ubah pesan user terakhir (dipakai untuk menempelkan info upload dari server)
+  const updateLastUserMessage = (id, fn) =>
+    update(id, c => {
+      const k = c.messages.map(m => m.role).lastIndexOf('user');
+      if (k < 0) return c;
+      const ms = c.messages.slice();
+      ms[k] = fn(ms[k]);
+      return { ...c, messages: ms };
+    });
   const togglePin = (id) => update(id, c => ({ ...c, pinned: !c.pinned }));
   const renameChat = (id, title) => update(id, c => ({ ...c, title }));
   const setChatModel = (id, model) => update(id, c => ({ ...c, model }));
   const deleteChat = (id) => setChats(cs => cs.filter(c => c.id !== id));
 
-  return { chats, createChat, addMessage, updateLastMessage, togglePin, renameChat, setChatModel, deleteChat };
+  return { chats, createChat, addMessage, updateLastMessage, updateLastUserMessage, togglePin, renameChat, setChatModel, deleteChat };
 }

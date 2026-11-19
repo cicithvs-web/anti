@@ -534,6 +534,11 @@ app.post('/api/chat/stream', upload.array('files', MAX_UPLOAD_FILES), async (req
     agy.writeState(slug, st);
 
     const job = jobs.createJob(slug);
+    // Beri tahu klien lokasi upload (relatif ke folder project) supaya lampiran gambar
+    // di pesan terkirim bisa ditampilkan lagi lewat /api/chats/:chatId/images/...
+    if (files.length) {
+      job.emit({ type: 'uploads', files: files.map((f) => ({ name: f.name, stored: `uploads/${path.basename(f.path)}` })) });
+    }
     runChatJob(job, slug, promptWithAttachments(text, files), st); // sengaja tidak di-await
     pipeJob(job, 0, req, res);
   } catch (err) {

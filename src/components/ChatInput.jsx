@@ -1,15 +1,15 @@
 import { useRef, useState, useEffect } from 'react';
-import { Plus, Mic, ArrowUp, Square, X, Crop } from 'lucide-react';
+import { Plus, Mic, ArrowUp, Square, X } from 'lucide-react';
 import RippleButton from './RippleButton.jsx';
 import useSpeechRecorder from '../hooks/useSpeechRecorder.js';
-import { isEditableImage } from '../services/imageEdit';
+import AttachmentTray from './AttachmentTray.jsx';
 
 // Perintah lokal: tidak dikirim ke agy, langsung toggle rekam suara
 const RECORD_CMD = /^\/(record|voice)$/i;
 
 export default function ChatInput({
   isNewChat, modelName, attachments, attachError, onClearAttachError,
-  onRemoveAttachment, onEditAttachment, onSend, onStop, onOpenAttach, onOpenModel, disabled,
+  onRemoveAttachment, onPreviewAttachment, onSend, onStop, onOpenAttach, onOpenModel, disabled,
 }) {
   const [text, setText] = useState('');
   const [expanded, setExpanded] = useState(isNewChat);
@@ -86,21 +86,7 @@ export default function ChatInput({
       {expanded && (attachments?.length > 0 || attachError) && (
         <div className="files">
           {attachments?.length > 0 && (
-            <div className="attach-row">
-              {attachments.map((f, i) => (
-                <span key={i} className="chip">
-                  <span className="chip-name">{f.name}</span>
-                  {onEditAttachment && isEditableImage(f) && (
-                    <button type="button" onClick={() => onEditAttachment(i)} aria-label="Edit foto">
-                      <Crop size={12} />
-                    </button>
-                  )}
-                  <button type="button" onClick={() => onRemoveAttachment(i)} aria-label="Hapus lampiran">
-                    <X size={12} />
-                  </button>
-                </span>
-              ))}
-            </div>
+            <AttachmentTray attachments={attachments} onRemove={onRemoveAttachment} onOpen={onPreviewAttachment} />
           )}
           {attachError && (
             <div className="attach-error" role="alert">

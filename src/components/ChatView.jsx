@@ -1,9 +1,11 @@
-import { Children, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Children, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Archive, ArrowDown, Check, Clock, Copy, ChevronRight, Download, File, ImageOff } from 'lucide-react';
 import ProcessSheet, { fmtDur } from './ProcessSheet';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { chatFileUrl, chatImageUrl } from '../services/ai';
+import { FileCard, ImageThumb, keyOf } from './AttachmentTray.jsx';
+import ImageLightbox from './ImageLightbox.jsx';
 
 // Link file:// (path lokal server) nggak bisa dibuka di HP -> tampilkan sebagai teks biasa
 const mdComponents = {
@@ -173,15 +175,31 @@ function ProcessRow({ m, onOpen }) {
   );
 }
 
+// Lampiran pesan terkirim: gambar yang tersimpan di server → thumbnail (tap = lightbox),
+// selain itu (atau gambar lama tanpa info lokasi / file sudah terhapus) → kartu file.
+function SentAttachments({ items, chatId, onOpenImage }) {
+  const [broken, setBroken] = useState(() => new Set());
+  return (
+    <div className="att-tray att-tray-sent">
+      {items.map((f, j) => {
+        const src = f.stored && f.type?.startsWith('image/') && !broken.has(j) ? chatImageUrl(chatId, f.stored) : null;
+        return src
+          ? <ImageThumb key={keyOf(f)} f={f} src={src} className="att-thumb-sent"
+              onOpen={() => onOpenImage({ name: f.name, url: src })}
+              onBroken={() => setBroken(s => new Set(s).add(j))} />
+          : <FileCard key={keyOf(f)} f={f} />;
+      })}
+    </div>
+  );
+}
+
 // Satu pesan. Di-memo: saat streaming hanya pesan terakhir (objeknya berubah) yang dirender ulang,
 // pesan lama tidak di-parse ulang oleh react-markdown.
-const MessageItem = memo(function MessageItem({ m, index, chatId, onOpen }) {
+const MessageItem = memo(function MessageItem({ m, index, chatId, onOpen, onOpenImage }) {
   return (
     <div className={'msg ' + (m.role === 'user' ? 'msg-user' : 'msg-ai')}>
       {m.attachments?.length > 0 && (
-        <div className="attach-row">
-          {m.attachments.map((f, j) => <span key={j} className="chip">{f.name}</span>)}
-        </div>
+        <SentAttachments items={m.attachments} chatId={chatId} onOpenImage={onOpenImage} />
       )}
       {m.role === 'assistant' && m.steps && <ProcessRow m={m} onOpen={() => onOpen(index)} />}
       {(m.content || m.role === 'user') && (
@@ -202,6 +220,8 @@ export default function ChatView({ messages, chatId }) {
   const prevLenRef = useRef(messages.length);
   const [atBottom, setAtBottom] = useState(true);
   const [openIdx, setOpenIdx] = useState(null);
+  const [lightbox, setLightbox] = useState(null);
+  const closeLightbox = useCallback(() => setLightbox(null), []);
   const getBox = () => boxRef.current || (boxRef.current = endRef.current?.closest('.content') || null);
 
   useEffect(() => {
@@ -222,6 +242,7 @@ export default function ChatView({ messages, chatId }) {
     stickRef.current = true;
     setAtBottom(true);
     setOpenIdx(null);
+    setLightbox(null);
     if (box) box.scrollTop = box.scrollHeight;
   }, [chatId]);
 
@@ -245,7 +266,7 @@ export default function ChatView({ messages, chatId }) {
   return (
     <div className="chat-view">
       {messages.map((m, i) => (
-        <MessageItem key={m.id ?? i} m={m} index={i} chatId={chatId} onOpen={setOpenIdx} />
+        <MessageItem key={m.id ?? i} m={m} index={i} chatId={chatId} onOpen={setOpenIdx} onOpenImage={setLightbox} />
       ))}
       <div ref={endRef} />
       {!atBottom && (
@@ -255,6 +276,7 @@ export default function ChatView({ messages, chatId }) {
           </button>
         </div>
       )}
+      <ImageLightbox item={lightbox} onClose={closeLightbox} />
       <ProcessSheet open={openIdx != null} msg={openIdx != null ? messages[openIdx] : null} onClose={() => setOpenIdx(null)} />
     </div>
   );

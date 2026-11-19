@@ -11,6 +11,7 @@ import SettingsSheet from './components/SettingsSheet';
 import AccountSheet from './components/AccountSheet';
 import AuthGate from './components/AuthGate';
 import ImageEditor from './components/ImageEditor';
+import ImageLightbox from './components/ImageLightbox';
 import { isEditableImage } from './services/imageEdit';
 import { useChats } from './hooks/useChats';
 import {
@@ -26,7 +27,7 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
 });
 
 export default function App() {
-  const { chats, createChat, addMessage, updateLastMessage, togglePin, renameChat, setChatModel, deleteChat } = useChats();
+  const { chats, createChat, addMessage, updateLastMessage, updateLastUserMessage, togglePin, renameChat, setChatModel, deleteChat } = useChats();
   const [authed, setAuthed] = useState(null); // null = cek, false = minta token, true = boleh
   const [activeId, setActiveId] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -38,6 +39,8 @@ export default function App() {
   const [attachError, setAttachError] = useState('');
   // Foto yang sedang dibuka di editor: { item, index } — index null = foto baru, angka = lampiran yang diedit ulang
   const [editing, setEditing] = useState(null);
+  // Lampiran gambar yang sedang dibuka di lightbox (objek lampiran, bukan index, supaya aman saat daftar berubah)
+  const [preview, setPreview] = useState(null);
   // status proses per chat (bukan global), supaya tombol stop tidak ikut ke chat lain
   const [loadingIds, setLoadingIds] = useState(() => new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -139,6 +142,16 @@ export default function App() {
         lastSeq = ev.seq;
       }
       if (needReset) { needReset = false; upd(() => ({ content: '', steps: [] })); }
+      if (ev.type === 'uploads') {
+        // tempel lokasi file di server ke lampiran pesan user (urutan sama dengan saat dikirim)
+        updateLastUserMessage(id, m => {
+          if (!m.attachments?.length || !Array.isArray(ev.files)) return m;
+          // dicocokkan per urutan (nama dari server bisa beda encoding untuk nama non-ASCII)
+          if (ev.files.length !== m.attachments.length) return m;
+          return { ...m, attachments: m.attachments.map((a, k) => ({ ...a, stored: ev.files[k].stored })) };
+        });
+        return;
+      }
       if (ev.type === 'queued') upd(() => ({ status: 'Menunggu antrean…' }));
       else if (ev.type === 'start') upd(() => ({ status: 'Berpikir…' }));
       else if (ev.type === 'step') upd(m => {
@@ -215,7 +228,7 @@ export default function App() {
     if ((!text.trim() && !files.length) || (activeId && loadingIds.has(activeId))) return;
     setAttachments([]);
     setAttachError('');
-    const userMsg = { role: 'user', content: text, attachments: files.map(f => ({ name: f.name, type: f.type })) };
+    const userMsg = { role: 'user', content: text, attachments: files.map(f => ({ name: f.name, type: f.type, size: f.size ?? f.file?.size })) };
     const useModel = active?.model || model;
 
     let id = activeId;
@@ -278,6 +291,8 @@ export default function App() {
     }
   };
 
+  const closePreview = useCallback(() => setPreview(null), []);
+
   const toAttachment = (file) => ({ name: file.name, type: file.type, size: file.size, file });
 
   const finishEdit = (file) => {
@@ -326,7 +341,7 @@ export default function App() {
           modelName={modelName} attachments={attachments}
           attachError={attachError} onClearAttachError={() => setAttachError('')}
           onRemoveAttachment={(i) => { setAttachments(a => a.filter((_, j) => j !== i)); setAttachError(''); }}
-          onEditAttachment={(i) => setEditing({ item: attachments[i], index: i })}
+          onPreviewAttachment={(i) => setPreview(attachments[i])}
           onSend={handleSend} onStop={() => stopChat(activeId)} disabled={loading}
           onOpenAttach={() => setSheet('attach')} onOpenModel={() => setSheet('model')}
         />
@@ -345,6 +360,13 @@ export default function App() {
 
       <AttachSheet open={sheet === 'attach'} onClose={() => setSheet(null)}
         limits={uploadLimits} onPick={handlePick} />
+
+      <ImageLightbox item={preview} onClose={closePreview}
+        onEdit={preview && isEditableImage(preview) ? () => {
+          const index = attachments.indexOf(preview);
+          setPreview(null);
+          if (index >= 0) setEditing({ item: preview, index });
+        } : undefined} />
 
       <ImageEditor item={editing?.item} onDone={finishEdit} onError={failEdit}
         onCancel={() => setEditing(null)} />
