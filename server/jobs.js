@@ -15,13 +15,14 @@ export function createJob(slug) {
     events: [],
     listeners: new Set(),
     done: false,
+    deleted: false,
     controller: new AbortController(),
     createdAt: Date.now(),
     cleanupTimer: null,
   };
 
   job.emit = (ev) => {
-    if (job.done) return;
+    if (job.done || job.deleted) return;
     const e = { ...ev, seq: job.events.length };
     job.events.push(e);
     for (const fn of [...job.listeners]) { try { fn(e); } catch {} }
@@ -59,6 +60,8 @@ export function stopJob(slug) {
 export function deleteJob(slug) {
   const j = jobs.get(slug);
   if (!j) return;
+  j.deleted = true;
+  j.listeners.clear();
   if (!j.done) j.controller.abort();
   if (j.cleanupTimer) clearTimeout(j.cleanupTimer);
   jobs.delete(slug);

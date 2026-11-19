@@ -480,9 +480,12 @@ async function runChatJob(job, slug, prompt, st) {
       return agy.agyPromptStream(slug, prompt, st.model, st.conversation_id, onEvent, signal);
     }, signal);
     const raw = r.raw_output || r.response || '';
-    if (r.conversation_id) st.conversation_id = r.conversation_id;
-    if (r.usage) { st.last_usage = r.usage; st.last_model = st.model; st.last_ts = Date.now(); }
-    agy.writeState(slug, st);
+    // Jangan tulis ulang state.json kalau obrolan sudah dihapus (cegah folder yatim setelah DELETE)
+    if (!job.deleted) {
+      if (r.conversation_id) st.conversation_id = r.conversation_id;
+      if (r.usage) { st.last_usage = r.usage; st.last_model = st.model; st.last_ts = Date.now(); }
+      agy.writeState(slug, st);
+    }
     const cancelled = signal.aborted || r.status === 'CANCELLED';
     const timedOut = !cancelled && r.timedOut ? r.timedOut : null;
     const lim = cancelled ? null : (r.limitDetected || null);

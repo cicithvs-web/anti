@@ -10,6 +10,8 @@ import ModelSheet from './components/ModelSheet';
 import SettingsSheet from './components/SettingsSheet';
 import AccountSheet from './components/AccountSheet';
 import AuthGate from './components/AuthGate';
+import ImageEditor from './components/ImageEditor';
+import { isEditableImage } from './services/imageEdit';
 import { useChats } from './hooks/useChats';
 import {
   apiStatus, authCheck, AUTH_EVENT, startChatStream, resumeChatStream, formatDone,
@@ -34,6 +36,8 @@ export default function App() {
   const [models, setModels] = useState(() => cachedModels()?.list || MODELS);
   const [attachments, setAttachments] = useState([]);
   const [attachError, setAttachError] = useState('');
+  // Foto yang sedang dibuka di editor: { item, index } — index null = foto baru, angka = lampiran yang diedit ulang
+  const [editing, setEditing] = useState(null);
   // status proses per chat (bukan global), supaya tombol stop tidak ikut ke chat lain
   const [loadingIds, setLoadingIds] = useState(() => new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -262,6 +266,42 @@ export default function App() {
     } else {
       setAttachError('');
     }
+    return accepted.length;
+  };
+
+  // Foto tunggal dari kamera/galeri dibuka di editor dulu; selain itu langsung jadi lampiran.
+  const handlePick = (picked, { source } = {}) => {
+    if ((source === 'camera' || source === 'photo') && picked.length === 1 && isEditableImage(picked[0])) {
+      setEditing({ item: picked[0], index: null });
+    } else {
+      pickAttachments(picked);
+    }
+  };
+
+  const toAttachment = (file) => ({ name: file.name, type: file.type, size: file.size, file });
+
+  const finishEdit = (file) => {
+    const { index } = editing;
+    setEditing(null);
+    if (index === null) { pickAttachments([toAttachment(file)]); return; }
+    const maxMb = uploadLimits.fileSizeMb || DEFAULT_UPLOAD_LIMITS.fileSizeMb;
+    const others = attachments.reduce((sum, f, j) => (j === index ? sum : sum + (f.size ?? f.file?.size ?? 0)), 0);
+    if (others + file.size > maxMb * 1024 * 1024) {
+      setAttachError(`Hasil edit melebihi total ${maxMb} MB, lampiran tidak diubah.`);
+      return;
+    }
+    setAttachments(a => a.map((f, j) => (j === index ? toAttachment(file) : f)));
+    setAttachError('');
+  };
+
+  const failEdit = (msg) => {
+    const { item, index } = editing;
+    setEditing(null);
+    if (index === null) {
+      if (pickAttachments([item])) setAttachError(`${msg}, dikirim tanpa edit.`);
+    } else {
+      setAttachError(`${msg}.`);
+    }
   };
 
   const loading = !!activeId && loadingIds.has(activeId);
@@ -286,6 +326,7 @@ export default function App() {
           modelName={modelName} attachments={attachments}
           attachError={attachError} onClearAttachError={() => setAttachError('')}
           onRemoveAttachment={(i) => { setAttachments(a => a.filter((_, j) => j !== i)); setAttachError(''); }}
+          onEditAttachment={(i) => setEditing({ item: attachments[i], index: i })}
           onSend={handleSend} onStop={() => stopChat(activeId)} disabled={loading}
           onOpenAttach={() => setSheet('attach')} onOpenModel={() => setSheet('model')}
         />
@@ -303,7 +344,10 @@ export default function App() {
       />
 
       <AttachSheet open={sheet === 'attach'} onClose={() => setSheet(null)}
-        limits={uploadLimits} onPick={pickAttachments} />
+        limits={uploadLimits} onPick={handlePick} />
+
+      <ImageEditor item={editing?.item} onDone={finishEdit} onError={failEdit}
+        onCancel={() => setEditing(null)} />
 
       <ModelSheet open={sheet === 'model'} onClose={() => setSheet(null)}
         model={chatModel} list={models} onOpen={() => refreshModels(false)} onChangeModel={changeModel} />

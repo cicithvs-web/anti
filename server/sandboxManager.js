@@ -221,8 +221,12 @@ export function killAgy(slug) {
 }
 
 export async function resetSandbox(slug) {
-  lastUsed.delete(slugSafe(slug));
-  try { await execFileP('docker', ['rm', '-f', getSafeContainerName(slug)], { stdio: ['pipe', 'pipe', 'pipe'] }); return true; }
+  const safe = slugSafe(slug);
+  lastUsed.delete(safe);
+  if (sandboxPending.has(safe)) {
+    try { await sandboxPending.get(safe); } catch {}
+  }
+  try { await execFileP('docker', ['rm', '-f', getSafeContainerName(safe)], { stdio: ['pipe', 'pipe', 'pipe'] }); return true; }
   catch { return false; }
 }
 

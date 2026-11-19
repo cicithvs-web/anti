@@ -270,7 +270,7 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .sheet-handle { width: 40px; height: 4px; background: #ccc; border-radius: 2px; margin: 0 auto 8px; }
 .sheet-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .sheet-header h3 { font-size: 17px; }
-.attach-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.attach-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .attach-card { background: var(--surface); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .attach-icon { width: 48px; height: 48px; border-radius: 50%; background: var(--panel); display: grid; place-items: center; }
 .attach-hint { margin-top: 10px; font-size: 12px; color: var(--muted); text-align: center; }
@@ -325,3 +325,20 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .auth-input:focus { border-color: var(--accent); }
 .auth-error { color: #ef4444; font-size: 13px; text-align: center; }
 .auth-card .account-btn { margin-bottom: 0; justify-content: center; }
+
+/* Editor foto (crop + putar) — layar penuh di atas semua sheet */
+.img-editor { position: fixed; inset: 0; z-index: 120; display: flex; flex-direction: column; background: #000; color: #fff; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); animation: dialog-fade-in .2s ease forwards; opacity: 0; }
+.img-editor .icon-btn { color: #fff; }
+.img-editor-top { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
+.img-editor-title { flex: 1; font-size: 16px; font-weight: 600; }
+.img-editor-done { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; }
+.img-editor-done:disabled { opacity: .5; }
+.img-editor-done .spin { animation: spin 1s linear infinite; }
+.img-editor-stage { position: relative; flex: 1; min-height: 0; }
+.img-editor-bottom { flex: none; display: flex; flex-direction: column; gap: 12px; padding: 12px 16px 16px; }
+.img-editor-aspects { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.img-editor-chip { padding: 6px 12px; border-radius: 999px; background: rgba(255,255,255,.12); color: #fff; font-size: 13px; }
+.img-editor-chip.active { background: #fff; color: #000; font-weight: 600; }
+.img-editor-tools { display: flex; align-items: center; gap: 12px; }
+.img-editor-tool { flex: none; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 50%; background: rgba(255,255,255,.12); color: #fff; }
+.img-editor-zoom { flex: 1; accent-color: var(--accent); }
