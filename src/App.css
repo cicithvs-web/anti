@@ -70,7 +70,9 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .header { display: flex; align-items: center; gap: 8px; padding: 12px 16px; }
 .header-title { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .icon-btn { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 50%; }
-.content { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.content { position: relative; flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.chat-shell { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 
 .welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
 .logo { font-size: 56px; color: var(--accent); }
@@ -178,9 +180,10 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .settings-handle { width: 36px; height: 4px; border-radius: 2px; background: var(--border); margin: 6px auto 10px; }
 .settings-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .settings-title { font-size: 20px; font-weight: 700; }
-.settings-close, .settings-back { background: var(--surface-2); border: none; border-radius: 50%; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; color: var(--text); cursor: pointer; }
+.settings-close, .settings-back, .settings-refresh { background: var(--surface-2); border: none; border-radius: 50%; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; color: var(--text); cursor: pointer; }
+.settings-refresh:disabled { opacity: .6; cursor: default; }
 .settings-page-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.settings-page-title { font-size: 18px; font-weight: 700; }
+.settings-page-title { flex: 1; font-size: 18px; font-weight: 700; }
 .settings-card { width: 100%; display: flex; align-items: center; gap: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 10px; cursor: pointer; color: var(--text); text-align: left; transition: transform .18s cubic-bezier(.2,.8,.3,1), background .18s; }
 .settings-card:active { transform: scale(.97); background: var(--surface-2); }
 .settings-card-icon { display: flex; }
@@ -206,8 +209,15 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .limit-body { display: flex; flex-direction: column; }
 .limit-label { font-size: 14px; font-weight: 600; }
 .limit-desc { font-size: 12px; color: var(--text-dim); }
-.settings-back { transition: background .18s, transform .18s; }
-.settings-back:active { transform: scale(.92); }
+.limit-status { font-size: 12.5px; color: var(--text-dim); margin: -4px 2px 10px; }
+.limit-empty { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px 14px; font-size: 13.5px; color: var(--text-dim); text-align: center; }
+.skel { display: block; border-radius: 6px; background: var(--surface-2); animation: pulse 1.3s ease-in-out infinite; }
+.skel-title { width: 88px; height: 12px; margin: 10px 0 6px; }
+.skel-icon { width: 20px; height: 20px; border-radius: 50%; flex: none; }
+.skel-line { height: 13px; }
+.skel-bar { width: 100%; height: 6px; border-radius: 3px; }
+.settings-back, .settings-refresh { transition: background .18s, transform .18s; }
+.settings-back:active, .settings-refresh:active { transform: scale(.92); }
 
 /* Tombol footer drawer: avatar akun + gear */
 .footer-btns { display: flex; gap: 14px; align-items: center; }
@@ -227,6 +237,11 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .account-btn:active { transform: scale(.98); }
 .account-btn.primary { background: var(--text); color: var(--bg); border-color: transparent; }
 .account-btn.danger { color: var(--danger, #dc2626); }
+.account-btn.admin-relock { font-size: 13.5px; font-weight: 500; color: var(--text-dim); padding: 10px; background: var(--panel); }
+.admin-lock-box { display: flex; flex-direction: column; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+.admin-lock-box .account-btn { margin-bottom: 0; }
+.admin-lock-head { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
+.admin-lock-head svg { flex: none; margin-top: 2px; color: var(--accent); }
 .account-hint { font-size: 12px; color: var(--text-dim); text-align: center; padding: 2px 8px 6px; }
 .new-chat-btn { display: flex; align-items: center; gap: 6px; background: var(--text); color: var(--bg); padding: 14px 22px; border-radius: 30px; }
 
@@ -281,10 +296,29 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .model-desc { color: var(--muted); font-size: 14px; }
 .badge { font-size: 12px; background: #e8eefb; color: #2b4c8c; padding: 2px 8px; border-radius: 10px; }
 
-/* ===== Proses mikir agy (baris ringkas + sheet Ringkasan) ===== */
-.proc-row { display: flex; align-items: center; gap: 8px; max-width: 100%; padding: 6px 2px; margin-bottom: 6px; color: var(--muted); font-size: 14.5px; background: none; border: none; cursor: pointer; text-align: left; transition: opacity .18s, transform .18s cubic-bezier(.2,.8,.3,1); animation: msg-in .3s ease both; }
-.proc-row:active { transform: scale(.98); opacity: .7; }
-.proc-row-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* ===== Proses berpikir & tool inline (mirip Claude) ===== */
+.proc-live-only { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-bottom: 6px; color: var(--muted); font-size: 14px; animation: msg-in .25s ease both; }
+.proc-inline { width: 100%; margin-bottom: 10px; animation: msg-in .25s ease both; }
+.proc-head { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 2px; color: var(--muted); font-size: 13.5px; font-weight: 500; background: none; border: none; cursor: pointer; text-align: left; transition: opacity .18s; }
+.proc-head:active { opacity: .65; }
+.proc-head-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proc-chev { flex: none; transition: transform .2s ease; }
+.proc-chev.closed { transform: rotate(-90deg); }
+.proc-timeline { margin-top: 6px; padding-left: 12px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+.proc-step { animation: fade-in .2s ease both; }
+.proc-thought-full { font-family: Georgia, 'Times New Roman', serif; font-size: 14.5px; line-height: 1.55; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+.proc-tool-btn { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 11px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); font-size: 13.5px; text-align: left; cursor: pointer; transition: background .15s, border-color .15s; }
+.proc-tool-btn:disabled { cursor: default; }
+.proc-tool-btn:not(:disabled):active { background: var(--panel); }
+.proc-tool-btn.waiting { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.proc-tool-ico { flex: none; display: inline-flex; color: var(--muted); }
+.proc-tool-btn.waiting .proc-tool-ico { color: var(--accent); }
+.proc-tool-label { flex: 1; min-width: 0; font-weight: 500; line-height: 1.35; word-break: break-word; }
+.proc-tool-meta { flex: none; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.proc-tool-btn.waiting .proc-tool-meta { color: var(--accent); font-weight: 600; }
+.proc-tool-chev { flex: none; color: var(--muted); transition: transform .18s ease; }
+.proc-tool-chev.open { transform: rotate(90deg); }
+.proc-live { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13.5px; }
 .shimmer { background: linear-gradient(90deg, var(--muted) 30%, var(--text) 50%, var(--muted) 70%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 1.8s linear infinite; }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 .spin { animation: spin 1s linear infinite; }
@@ -292,28 +326,38 @@ button { background: none; border: none; color: inherit; font: inherit; cursor: 
 .pulse { animation: pulse 1.4s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .35; } }
 .caret { display: inline-block; width: 7px; height: 1em; margin-left: 2px; vertical-align: -2px; background: var(--muted); border-radius: 1px; animation: pulse 1s steps(2) infinite; }
-/* Popup Ringkasan: cangkang melengkung tidak ikut scroll, hanya isi di dalamnya */
-.settings-sheet.proc-sheet { display: flex; flex-direction: column; padding: 8px 0 0; overflow: hidden; max-height: 80vh; max-height: 80dvh; }
-.proc-sheet-top { flex: none; padding: 0 16px; }
-.proc-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; contain: paint; padding: 0 16px calc(16px + env(safe-area-inset-bottom)); }
-.proc-sheet-top { background: var(--bg); position: relative; z-index: 2; }
-.proc-list { position: relative; padding: 4px 0 8px; }
-.proc-list::before { content: ''; position: absolute; left: 15px; top: 14px; bottom: 22px; width: 1px; background: var(--border); }
-.proc-item { position: relative; display: flex; gap: 14px; align-items: flex-start; padding: 8px 0; animation: msg-in .3s ease both; }
-.proc-dot { flex: none; width: 10px; height: 10px; margin: 7px 10px 0; border-radius: 50%; background: var(--border); position: relative; z-index: 1; }
-.proc-icon { flex: none; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--surface, #fff); color: var(--text); position: relative; z-index: 1; }
-.proc-icon.done { color: #3a8a4f; }
-.proc-thought { flex: 1; font-family: Georgia, 'Times New Roman', serif; font-size: 16px; line-height: 1.45; color: var(--muted); }
-.proc-body { flex: 1; min-width: 0; }
-.proc-label { display: block; width: 100%; text-align: left; background: none; border: none; padding: 4px 0 0; color: var(--text); font-size: 15.5px; font-weight: 600; line-height: 1.35; word-break: break-word; cursor: pointer; }
-.proc-label:disabled, .proc-label.static { cursor: default; color: var(--text); }
-.proc-meta { font-size: 12.5px; color: var(--muted); font-weight: 400; margin-top: 2px; }
-.proc-output { margin: 8px 0 0; padding: 10px; max-height: 220px; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; font-size: 12px; white-space: pre-wrap; word-break: break-word; overscroll-behavior: contain; animation: fade-in .2s ease both; }
+.proc-output { margin: 6px 0 0; padding: 10px; max-height: 220px; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; font-size: 12px; white-space: pre-wrap; word-break: break-word; overscroll-behavior: contain; animation: fade-in .2s ease both; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 
+/* ===== Popup pertanyaan AI (ask_question) & banner minimize ===== */
+.q-form { display: flex; flex-direction: column; gap: 16px; }
+.q-block { display: flex; flex-direction: column; gap: 8px; }
+.q-block .card-list { margin-bottom: 0; }
+.q-title { display: flex; gap: 6px; font-size: 16px; font-weight: 600; line-height: 1.4; color: var(--text); }
+.q-num { color: var(--accent); flex: none; }
+.q-desc, .q-hint { font-size: 13px; color: var(--muted); margin-top: -4px; }
+.q-opt { gap: 12px; }
+.q-opt.selected { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); }
+.q-opt-label { flex: 1; min-width: 0; font-size: 16px; line-height: 1.35; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text); }
+.q-opt .badge { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); font-weight: 600; }
+.q-check-icon { flex: none; color: var(--accent); }
+.q-checkbox { flex: none; width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid var(--border); display: grid; place-items: center; color: #fff; transition: background .15s, border-color .15s; }
+.q-checkbox.checked { background: var(--accent); border-color: var(--accent); }
+.q-other-input { font-size: 15px; }
+.q-error { color: var(--danger, #ef4444); font-size: 13px; text-align: center; }
+.q-actions { display: flex; gap: 10px; padding-top: 4px; }
+.q-actions .app-dialog-btn { flex: 1; }
+
+.question-banner { display: flex; align-items: center; gap: 10px; width: 100%; margin-bottom: 8px; padding: 10px 14px; border-radius: 16px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); color: var(--text); text-align: left; cursor: pointer; animation: fade-in .2s ease both; }
+.question-banner svg { flex: none; color: var(--accent); }
+.question-banner-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.question-banner-text strong { font-size: 13.5px; font-weight: 600; }
+.question-banner-text small { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.question-banner-cta { flex: none; padding: 5px 12px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 600; }
+
 /* ---------- tombol "ke pesan terbaru" ---------- */
-.scroll-bottom-wrap { position: sticky; bottom: 12px; height: 0; display: flex; justify-content: center; z-index: 5; margin-top: -16px; }
-.scroll-bottom { position: absolute; bottom: 0; width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--text); display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,.15); cursor: pointer; animation: fade-in .2s ease both; }
+.scroll-bottom-wrap { position: absolute; left: 0; right: 0; bottom: 12px; display: flex; justify-content: center; pointer-events: none; z-index: 5; }
+.scroll-bottom { pointer-events: auto; width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--text); display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,.15); cursor: pointer; animation: fade-in .2s ease both; }
 
 /* ---------- layar token akses ---------- */
 .auth-gate { display: flex; align-items: center; justify-content: center; padding: 24px; }

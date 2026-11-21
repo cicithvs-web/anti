@@ -8,8 +8,9 @@ import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   ensureSandbox, spawnInSandbox, killAgy,
-  getSafeContainerName, AGY_BIN_IN_SANDBOX, SANDBOX_IMAGE, GEMINI_DATA_DIR,
+  getSafeContainerName, AGY_BIN_IN_SANDBOX, SANDBOX_IMAGE, GEMINI_DATA_DIR, SANDBOX_HOME,
 } from './sandboxManager.js';
+import { runAcpTurn } from './acpClient.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export { SANDBOX_IMAGE, getSafeContainerName };
@@ -70,6 +71,31 @@ export function writeState(slug, st) {
   fs.writeFileSync(path.join(BASE, slug, 'state.json'), JSON.stringify(st, null, 2));
 }
 
+// Hapus data internal CLI agy (conversations, brain, annotations, presence) milik satu conversation_id.
+const AGY_CLI_DIR = path.join(GEMINI_DATA_DIR, 'antigravity-cli');
+export function deleteConversationData(conversationId) {
+  const id = String(conversationId || '').trim();
+  if (!/^[a-zA-Z0-9_-]{8,128}$/.test(id)) return 0;
+  let removed = 0;
+  const rmSafe = (dir, entry) => {
+    const base = path.resolve(dir);
+    const target = path.resolve(base, entry);
+    if (!target.startsWith(base + path.sep)) return;
+    try { fs.rmSync(target, { recursive: true, force: true }); removed++; } catch {}
+  };
+  for (const sub of ['conversations', 'annotations', 'presence']) {
+    const dir = path.join(AGY_CLI_DIR, sub);
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      if (name === id || name.startsWith(id + '.')) rmSafe(dir, name);
+    }
+  }
+  const brainEntry = path.join(AGY_CLI_DIR, 'brain', id);
+  if (fs.existsSync(brainEntry)) rmSafe(path.join(AGY_CLI_DIR, 'brain'), id);
+  return removed;
+}
+
 // ---------- limit ----------
 export function detectLimit(raw) {
   const t = String(raw || '');
@@ -94,6 +120,13 @@ const readMinutes = (name, def) => {
 export const PROMPT_IDLE_MIN = readMinutes('AGY_PROMPT_IDLE_MIN', 10);
 // Max timeout: batas total 1 giliran eksekusi agar tidak mengunci slot antrean selamanya (0 = nonaktif)
 export const PROMPT_MAX_MIN = readMinutes('AGY_PROMPT_MAX_MIN', 60);
+// Batas waktu user menjawab popup pertanyaan AI (ask_question). Lewat batas → otomatis "Lewati" (0 = tanpa batas).
+// Selama menunggu jawaban, idle/max timeout di atas dijeda.
+export const QUESTION_TIMEOUT_MIN = readMinutes('AGY_QUESTION_TIMEOUT_MIN', 30);
+// Cara menjalankan agy untuk chat:
+//   acp   (default) → `agy acp` (JSON-RPC). Mendukung popup ask_question & teks proses berpikir.
+//   print (cadangan) → `agy -p --output-format stream-json` (cara lama; ask_question selalu dijawab kosong).
+export const AGY_MODE = String(process.env.AGY_MODE || 'acp').trim().toLowerCase() === 'print' ? 'print' : 'acp';
 const MAX_RAW_OUT = 256 * 1024; // batasi tail buffer raw_output di RAM untuk tugas berdurasi lama
 
 // ---------- agyPrompt (async, jalan di sandbox) ----------
@@ -127,7 +160,7 @@ export function agyPrompt(slug, text, model, conversationId) {
 }
 
 // ---------- agyPromptStream: sama dengan agyPrompt tapi --output-format stream-json ----------
-// onEvent(ev) dipanggil per baris NDJSON (init / step_update / result) → buat timeline "proses mikir".
+// onEvent(ev) menerima event netral (lihat acpClient.js): tool / delta / think (durasi mikir tanpa teks).
 export function agyPromptStream(slug, text, model, conversationId, onEvent, signal) {
   return new Promise(async (resolve) => {
     if (signal?.aborted) { resolve({ status: 'CANCELLED', response: '', cancelled: true }); return; }
@@ -146,22 +179,39 @@ export function agyPromptStream(slug, text, model, conversationId, onEvent, sign
       resolve({ status: 'ERROR', response: String(e.message || e), error: String(e) });
       return;
     }
-    let out = '', buf = '', result = null, convId = null, usage = null, settled = false;
+    let out = '', buf = '', result = null, convId = null, usage = null, settled = false, answerStep = null;
     const appendOut = (s) => { out += s; if (out.length > MAX_RAW_OUT) out = out.slice(-MAX_RAW_OUT); };
     const stop = () => { try { proc.kill('SIGKILL'); } catch {} killAgy(slug); };
     if (signal) {
       if (signal.aborted) stop();
       else signal.addEventListener('abort', stop, { once: true });
     }
+    const emit = (ev) => { try { onEvent && onEvent(ev); } catch {} };
     const handleLine = (line) => {
       line = line.trim(); if (!line) return;
       let ev; try { ev = JSON.parse(line); } catch { return; }
+      const prevConv = convId;
       if (ev.conversation_id) convId = ev.conversation_id;
       const su = ev.step_update;
       if (su?.conversation_id) convId = su.conversation_id;
+      if (convId && convId !== prevConv) emit({ kind: 'session', id: convId });
       if (su?.usage) usage = su.usage;
       if (ev.event === 'result') result = ev.result;
-      try { onEvent && onEvent(ev); } catch {}
+      if (!su) return;
+      const idx = su.step_index;
+      if (su.step_type === 'tool') {
+        emit({
+          kind: 'tool', id: idx, name: su.tool_name || '', params: su.tool_info?.parameters || {},
+          status: su.state === 'DONE' ? 'done' : 'running', duration: su.duration_seconds ?? null,
+          output: su.tool_info?.output ? String(su.tool_info.output).slice(0, 1500) : null,
+        });
+      } else if (su.step_type === 'agent_response') {
+        if (su.text_delta) { answerStep = idx; emit({ kind: 'delta', text: su.text_delta }); }
+        else if (su.state === 'DONE' && idx !== answerStep) {
+          // langkah "mikir" sebelum memakai tool (mode print tidak membuka teks thinking-nya, hanya durasi & token)
+          emit({ kind: 'think', id: idx, duration: su.duration_seconds ?? null, thinkingTokens: su.usage?.thinking_tokens ?? null });
+        }
+      }
     };
     proc.stdout.on('data', (d) => {
       const s = d.toString(); appendOut(s); buf += s;
@@ -185,6 +235,82 @@ export function agyPromptStream(slug, text, model, conversationId, onEvent, sign
       resolve({ status: 'ERROR', response: out.replace(/\{"event"[^\n]*\n?/g, '').trim() || '(tidak ada output)', conversation_id: convId, error: 'parse', limitDetected: lim, raw_output: out });
     });
   });
+}
+
+// ---------- agyPromptAcp: 1 giliran lewat `agy acp` (JSON-RPC stdio) di sandbox ----------
+// Hasil sama bentuknya dengan agyPromptStream. Tambahan: onQuestion(question) → Promise<{action, content}>
+// dipanggil saat AI memakai ask_question; selama menunggu, idle/max timeout dijeda.
+export function agyPromptAcp(slug, text, model, conversationId, onEvent, signal, { onQuestion } = {}) {
+  return new Promise(async (resolve) => {
+    if (signal?.aborted) { resolve({ status: 'CANCELLED', response: '', cancelled: true }); return; }
+    let proc;
+    let timedOut = null; // 'idle' | 'max' | null
+    try {
+      proc = await spawnInSandbox(slug, [AGY_BIN_IN_SANDBOX, 'acp', '--dangerously-skip-permissions'], {
+        timeoutMs: PROMPT_MAX_MIN > 0 ? PROMPT_MAX_MIN * 60 * 1000 : 0,
+        idleTimeoutMs: PROMPT_IDLE_MIN > 0 ? PROMPT_IDLE_MIN * 60 * 1000 : 0,
+        onTimeout: (reason) => { timedOut = reason || 'max'; killAgy(slug); },
+      });
+    } catch (e) {
+      resolve({ status: 'ERROR', response: String(e.message || e), error: String(e) });
+      return;
+    }
+    let out = '';
+    const appendOut = (s) => { out += s; if (out.length > MAX_RAW_OUT) out = out.slice(-MAX_RAW_OUT); };
+    proc.stderr.on('data', (d) => appendOut(d.toString()));
+    let closed = false;
+    const closedP = new Promise((r) => proc.on('close', () => { closed = true; r(); }));
+    const stop = () => { try { proc.kill('SIGKILL'); } catch {} killAgy(slug); };
+    if (signal) {
+      if (signal.aborted) stop();
+      else signal.addEventListener('abort', stop, { once: true });
+    }
+
+    const r = await runAcpTurn(proc, {
+      cwd: SANDBOX_HOME, text, model, conversationId, onEvent, signal,
+      brainDir: path.join(AGY_CLI_DIR, 'brain'),
+      onActivity: () => proc.bumpIdle?.(),
+      onQuestion: onQuestion && (async (q) => {
+        proc.pauseTimers?.();
+        try { return await onQuestion(q); } finally { proc.resumeTimers?.(); }
+      }),
+      log: (s) => console.warn(`[agy acp ${slug}] ${s}`),
+    });
+    signal?.removeEventListener('abort', stop);
+
+    // Tutup sesi: stdin EOF → `agy acp` keluar sendiri (±0,5 dtk). Tunggu sampai benar-benar keluar
+    // sebelum resolve, supaya job berikutnya di chat ini tidak bentrok dengan proses lama.
+    if (!closed) {
+      try { proc.stdin.end(); } catch {}
+      const t = setTimeout(stop, 5000);
+      await closedP;
+      clearTimeout(t);
+    }
+
+    const raw = `${out}${r.error ? `\n${r.error}` : ''}`;
+    // stderr agy acp berisi log biasa → deteksi limit hanya kalau gilirannya gagal (hindari salah deteksi)
+    const lim = r.status === 'SUCCESS' ? null : detectLimit(raw);
+    if (signal?.aborted || r.status === 'CANCELLED') {
+      resolve({ status: 'CANCELLED', response: '', cancelled: true, conversation_id: r.conversation_id });
+      return;
+    }
+    if (timedOut && r.status !== 'SUCCESS') {
+      const msg = timedOut === 'idle'
+        ? `Tidak ada aktivitas dari AI selama ${PROMPT_IDLE_MIN} menit (kemungkinan proses macet). Kirim "lanjutkan" jika tugas belum selesai.`
+        : `Batas waktu maksimal eksekusi (${PROMPT_MAX_MIN} menit) tercapai. Kirim "lanjutkan" untuk meneruskan pekerjaan.`;
+      resolve({ status: 'ERROR', timedOut, response: msg, conversation_id: r.conversation_id, error: `timeout:${timedOut}`, limitDetected: lim, raw_output: raw });
+      return;
+    }
+    if (r.status === 'ERROR' && !r.response) r.response = out.trim().slice(-2000) || '(tidak ada output)';
+    resolve({ ...r, limitDetected: lim, raw_output: raw });
+  });
+}
+
+// Pilih mode sesuai AGY_MODE (acp default, print cadangan)
+export function agyPromptLive(slug, text, model, conversationId, onEvent, signal, opts = {}) {
+  return AGY_MODE === 'print'
+    ? agyPromptStream(slug, text, model, conversationId, onEvent, signal)
+    : agyPromptAcp(slug, text, model, conversationId, onEvent, signal, opts);
 }
 
 // ---------- antrean global FIFO (MAX_PARALLEL default 2) ----------

@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'antigpt',
       script: 'server/server.js',
-      cwd: '/opt/anti',
+      cwd: '/opt/2009/anti',
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,

@@ -13,6 +13,7 @@ try { process.loadEnvFile(path.join(__dirname, '../.env')); } catch {}
 const agy = await import('./agy.js');
 const agySandbox = await import('./sandboxManager.js');
 const jobs = await import('./jobs.js');
+const { buildElicitationAnswer } = await import('./acpClient.js');
 
 const app = express();
 app.set('trust proxy', true); // supaya req.secure / req.ip benar di belakang nginx / tunnel
@@ -45,14 +46,21 @@ app.get('/health', (req, res) => res.status(200).json({ ok: true, service: 'anti
 
 // ---------- AUTH (token di .env) ----------
 // Browser: POST /api/auth {token} → cookie httpOnly. Script/curl: header `Authorization: Bearer <token>`.
+// Opsional: ADMIN_TOKEN mengunci manajemen akun (login/ganti akun/logout) & reset sandbox.
 let AUTH_TOKEN = String(process.env.AUTH_TOKEN || '').trim();
 if (!AUTH_TOKEN) {
   AUTH_TOKEN = crypto.randomBytes(24).toString('base64url');
   console.warn('[auth] ⚠️  AUTH_TOKEN belum di-set di .env — memakai token sementara (berubah tiap restart):');
   console.warn(`[auth]     ${AUTH_TOKEN}`);
 }
+const ADMIN_TOKEN = String(process.env.ADMIN_TOKEN || '').trim();
+const ADMIN_ENABLED = !!ADMIN_TOKEN;
 const AUTH_COOKIE = 'antigpt_auth';
+const ADMIN_COOKIE = 'antigpt_admin';
 const cookieValue = crypto.createHmac('sha256', AUTH_TOKEN).update('antigpt-cookie-v1').digest('base64url');
+const adminCookieValue = ADMIN_ENABLED
+  ? crypto.createHmac('sha256', ADMIN_TOKEN).update('antigpt-admin-cookie-v1').digest('base64url')
+  : '';
 const safeEqual = (a, b) => {
   const x = Buffer.from(String(a)), y = Buffer.from(String(b));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
@@ -64,42 +72,94 @@ function readCookie(req, name) {
   }
   return null;
 }
+function isAdmin(req) {
+  if (!ADMIN_ENABLED) return true;
+  const adminHdr = String(req.headers['x-admin-token'] || '').trim();
+  if (adminHdr && safeEqual(adminHdr, ADMIN_TOKEN)) return true;
+  const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '')?.[1];
+  if (bearer && safeEqual(bearer.trim(), ADMIN_TOKEN)) return true;
+  const c = readCookie(req, ADMIN_COOKIE);
+  return !!c && safeEqual(c, adminCookieValue);
+}
 function isAuthed(req) {
   const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '')?.[1];
   if (bearer && safeEqual(bearer.trim(), AUTH_TOKEN)) return true;
   const c = readCookie(req, AUTH_COOKIE);
-  return !!c && safeEqual(c, cookieValue);
+  if (c && safeEqual(c, cookieValue)) return true;
+  return ADMIN_ENABLED && isAdmin(req);
 }
-function setAuthCookie(req, res, value, maxAge) {
+function setCookie(req, res, name, value, maxAge) {
   const secure = req.secure ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`);
+  res.append('Set-Cookie', `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`);
 }
 // rate limit percobaan token salah: 10x / 15 menit per IP
 const authFails = new Map();
+const adminFails = new Map();
 const FAIL_WINDOW = 15 * 60 * 1000, FAIL_MAX = 10;
-app.get('/api/auth', (req, res) => res.json({ ok: true, authed: isAuthed(req) }));
+const isRateLimited = (map, ip) => {
+  const rec = map.get(ip);
+  if (rec && Date.now() - rec.first > FAIL_WINDOW) { map.delete(ip); return false; }
+  return !!rec && rec.count >= FAIL_MAX;
+};
+const recordFail = (map, ip) => {
+  const cur = map.get(ip);
+  map.set(ip, cur ? { ...cur, count: cur.count + 1 } : { first: Date.now(), count: 1 });
+};
+
+app.get('/api/auth', (req, res) => {
+  const authed = isAuthed(req);
+  res.json({ ok: true, authed, adminEnabled: ADMIN_ENABLED, isAdmin: authed && isAdmin(req) });
+});
 app.post('/api/auth', (req, res) => {
   const ip = req.ip || 'unknown';
-  const now = Date.now();
-  const rec = authFails.get(ip);
-  if (rec && now - rec.first > FAIL_WINDOW) authFails.delete(ip);
-  const cur = authFails.get(ip);
-  if (cur && cur.count >= FAIL_MAX) {
+  if (isRateLimited(authFails, ip)) {
     return res.status(429).json({ ok: false, error: 'Terlalu banyak percobaan. Coba lagi nanti.' });
   }
-  if (!safeEqual(String(req.body?.token || '').trim(), AUTH_TOKEN)) {
-    authFails.set(ip, cur ? { ...cur, count: cur.count + 1 } : { first: now, count: 1 });
+  const token = String(req.body?.token || '').trim();
+  const okUser = safeEqual(token, AUTH_TOKEN);
+  const okAdmin = ADMIN_ENABLED && safeEqual(token, ADMIN_TOKEN);
+  if (!okUser && !okAdmin) {
+    recordFail(authFails, ip);
     return setTimeout(() => res.status(401).json({ ok: false, error: 'Token salah.' }), 600);
   }
   authFails.delete(ip);
-  setAuthCookie(req, res, cookieValue, 60 * 60 * 24 * 365);
-  res.json({ ok: true, authed: true });
+  setCookie(req, res, AUTH_COOKIE, cookieValue, 60 * 60 * 24 * 365);
+  if (okAdmin) setCookie(req, res, ADMIN_COOKIE, adminCookieValue, 60 * 60 * 24 * 365);
+  else setCookie(req, res, ADMIN_COOKIE, '', 0);
+  res.json({ ok: true, authed: true, isAdmin: !ADMIN_ENABLED || okAdmin });
 });
-app.post('/api/auth/logout', (req, res) => { setAuthCookie(req, res, '', 0); res.json({ ok: true }); });
+app.post('/api/auth/logout', (req, res) => {
+  setCookie(req, res, AUTH_COOKIE, '', 0);
+  setCookie(req, res, ADMIN_COOKIE, '', 0);
+  res.json({ ok: true });
+});
 // Semua /api/* lain wajib terautentikasi
 app.use('/api', (req, res, next) => {
   if (isAuthed(req)) return next();
   res.status(401).json({ ok: false, auth: false, error: 'Unauthorized' });
+});
+function requireAdmin(req, res, next) {
+  if (isAdmin(req)) return next();
+  res.status(403).json({ ok: false, adminRequired: true, error: 'Butuh kunci admin untuk aksi ini.' });
+}
+app.post('/api/admin/auth', (req, res) => {
+  if (!ADMIN_ENABLED) return res.json({ ok: true, isAdmin: true });
+  const ip = req.ip || 'unknown';
+  if (isRateLimited(adminFails, ip)) {
+    return res.status(429).json({ ok: false, error: 'Terlalu banyak percobaan. Coba lagi nanti.' });
+  }
+  if (!safeEqual(String(req.body?.token || '').trim(), ADMIN_TOKEN)) {
+    recordFail(adminFails, ip);
+    // 403 (bukan 401) agar browser tidak logout dari sesi chat utama
+    return setTimeout(() => res.status(403).json({ ok: false, error: 'Kunci admin salah.' }), 600);
+  }
+  adminFails.delete(ip);
+  setCookie(req, res, ADMIN_COOKIE, adminCookieValue, 60 * 60 * 24 * 365);
+  res.json({ ok: true, isAdmin: true });
+});
+app.post('/api/admin/logout', (req, res) => {
+  setCookie(req, res, ADMIN_COOKIE, '', 0);
+  res.json({ ok: true, isAdmin: !ADMIN_ENABLED });
 });
 
 function safeName(name) {
@@ -325,6 +385,7 @@ function promptWithAttachments(text, files = []) {
 
 // ---------- STATUS ----------
 app.get('/api/status', (req, res) => {
+  const admin = isAdmin(req);
   res.json({
     ok: true,
     email: agy.whoamiEmail(),
@@ -332,7 +393,10 @@ app.get('/api/status', (req, res) => {
     running: agy.runningCount(),
     maxParallel: agy.MAX_PARALLEL,
     queued: agy.queuedCount(),
-    login: agy.getLoginState(),
+    mode: agy.AGY_MODE,
+    adminEnabled: ADMIN_ENABLED,
+    isAdmin: admin,
+    login: admin ? agy.getLoginState() : null,
     limits: { files: MAX_UPLOAD_FILES, fileSizeMb: MAX_UPLOAD_MB },
   });
 });
@@ -398,7 +462,7 @@ app.post('/api/chat', upload.array('files', MAX_UPLOAD_FILES), async (req, res, 
 
 // ---------- CHAT STREAM (NDJSON) — timeline proses agy (tool, durasi, teks bertahap) ----------
 // Setiap baris = 1 JSON: {type:'step', step}, {type:'delta', text}, {type:'queued'}, {type:'done', ...}
-function toolLabel(name, p = {}) {
+function toolLabel(name, p = {}, fallbackTitle = '') {
   const f = (x) => String(x || '').split('/').pop();
   const map = {
     run_command: () => `Jalankan: ${p.CommandLine || ''}`,
@@ -412,11 +476,19 @@ function toolLabel(name, p = {}) {
     grep_search: () => `Cari "${p.Query || p.Pattern || ''}"`,
     search_web: () => `Cari di web: ${p.query || p.Query || ''}`,
     read_url_content: () => `Buka ${p.Url || p.url || ''}`,
+    ask_question: () => {
+      const qs = Array.isArray(p.questions) ? p.questions : [];
+      return `Bertanya: ${qs[0]?.question || ''}${qs.length > 1 ? ` (+${qs.length - 1} pertanyaan)` : ''}`;
+    },
+    invoke_subagent: () => `Subagent: ${p.Role || p.TypeName || 'background'}`,
+    run_workflow: () => `Workflow: ${p.Description || 'menjalankan alur kerja'}`,
+    schedule: () => 'Menjadwalkan timer',
   };
-  return (map[name] ? map[name]() : name.replace(/_/g, ' ')).slice(0, 160);
+  return (map[name] ? map[name]() : (fallbackTitle || name.replace(/_/g, ' '))).slice(0, 160);
 }
 const toolKind = (n) => /command|terminal/.test(n) ? 'terminal' : /write|edit|replace/.test(n) ? 'edit'
-  : /read|view|list|grep|find|search_file/.test(n) ? 'read' : /web|url|browser/.test(n) ? 'web' : 'tool';
+  : /read|view|list|grep|find|search_file/.test(n) ? 'read' : /web|url|browser/.test(n) ? 'web'
+  : /question/.test(n) ? 'question' : 'tool';
 
 // Respons NDJSON: replay event job mulai `since`, lalu ikuti event baru sampai `done`.
 // Putusnya koneksi TIDAK membatalkan job — klien bisa menyambung lagi lewat GET /api/chat/stream.
@@ -448,40 +520,84 @@ function ndjsonOnce(res, obj) {
 
 async function runChatJob(job, slug, prompt, st) {
   const started = Date.now();
-  let answerStep = null;
   let partial = '';
+  const questionOutputs = new Map(); // toolCallId → ringkasan jawaban user untuk ditampilkan di output step
+  // onEvent menerima event netral dari agy.js (sama untuk mode acp & print)
   const onEvent = (ev) => {
-    const su = ev.step_update;
-    if (!su) return;
-    const idx = su.step_index;
-    if (su.step_type === 'tool') {
-      const p = su.tool_info?.parameters || {};
+    if (ev.kind === 'session' && ev.id) {
+      job.conversationId = ev.id;
+      return;
+    }
+    if (ev.kind === 'tool') {
+      const done = ev.status !== 'running';
       job.emit({ type: 'step', step: {
-        id: idx, kind: toolKind(su.tool_name || ''), tool: su.tool_name, label: toolLabel(su.tool_name || 'tool', p),
-        status: su.state === 'DONE' ? 'done' : 'running',
-        duration: su.duration_seconds ?? null,
-        output: su.tool_info?.output ? String(su.tool_info.output).slice(0, 1500) : null,
+        id: ev.id, kind: toolKind(ev.name || ''), tool: ev.name, label: toolLabel(ev.name || 'tool', ev.params || {}, ev.title || ''),
+        status: done ? 'done' : 'running',
+        error: ev.status === 'error' || undefined,
+        duration: ev.duration ?? null,
+        output: ev.output ?? (done ? questionOutputs.get(ev.id) ?? null : null),
       } });
-    } else if (su.step_type === 'agent_response') {
-      if (su.text_delta) { answerStep = idx; partial += su.text_delta; job.emit({ type: 'delta', text: su.text_delta }); }
-      else if (su.state === 'DONE' && idx !== answerStep) {
-        // langkah "mikir" sebelum memakai tool (agy tidak membuka teks thinking-nya, hanya durasi & token)
-        job.emit({ type: 'step', step: { id: idx, kind: 'think', label: 'Berpikir', status: 'done',
-          duration: su.duration_seconds ?? null, thinkingTokens: su.usage?.thinking_tokens ?? null } });
-      }
+    } else if (ev.kind === 'delta') {
+      partial += ev.text;
+      job.emit({ type: 'delta', text: ev.text });
+    } else if (ev.kind === 'thought') {
+      // teks proses berpikir (mode acp) — dikirim bertahap, klien menyambungnya per id
+      job.emit({ type: 'thought', id: ev.id, text: ev.text });
+    } else if (ev.kind === 'status' && ev.text) {
+      job.emit({ type: 'status', text: ev.text });
+    } else if (ev.kind === 'think') {
+      // mode print: hanya durasi & token mikir
+      job.emit({ type: 'step', step: { id: ev.id, kind: 'think', label: 'Berpikir', status: 'done',
+        duration: ev.duration ?? null, thinkingTokens: ev.thinkingTokens ?? null } });
     }
   };
 
+  // AI memakai ask_question → kirim event `question` ke klien, tunggu POST /api/chat/answer.
+  const signal = job.controller.signal;
+  const onQuestion = (q) => new Promise((resolve) => {
+    const id = crypto.randomUUID().slice(0, 12);
+    const timeoutMs = agy.QUESTION_TIMEOUT_MIN > 0 ? agy.QUESTION_TIMEOUT_MIN * 60 * 1000 : 0;
+    let timer = null;
+    const finish = (answer, info) => {
+      if (job.question?.id !== id) return false;
+      if (timer) clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      job.question = null;
+      if (q.toolCallId) {
+        if (info?.answered && Array.isArray(info.summary) && info.summary.length) {
+          questionOutputs.set(q.toolCallId, info.summary.map((s) => `${s.title}\n→ ${s.answer || '(kosong)'}`).join('\n\n'));
+        } else if (info?.skipped) {
+          questionOutputs.set(q.toolCallId, info.timedOut ? 'Dilewati otomatis (batas waktu habis).' : 'Dilewati.');
+        }
+      }
+      job.emit({ type: 'question_done', id, ...info });
+      resolve(answer);
+      return true;
+    };
+    const onAbort = () => finish({ action: 'cancel' }, { cancelled: true });
+    job.question = { id, q, finish };
+    if (timeoutMs) {
+      timer = setTimeout(() => finish({ action: 'decline' }, { skipped: true, timedOut: true }), timeoutMs);
+      timer.unref?.();
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    job.emit({ type: 'question', question: {
+      id, message: q.message, fields: q.fields,
+      expiresAt: timeoutMs ? Date.now() + timeoutMs : null,
+    } });
+  });
+
   try {
     if (agy.isQueueFull()) job.emit({ type: 'queued' });
-    const signal = job.controller.signal;
     const r = await agy.runQueued(slug, () => {
       job.emit({ type: 'start' });
-      return agy.agyPromptStream(slug, prompt, st.model, st.conversation_id, onEvent, signal);
+      return agy.agyPromptLive(slug, prompt, st.model, st.conversation_id, onEvent, signal, { onQuestion });
     }, signal);
     const raw = r.raw_output || r.response || '';
     // Jangan tulis ulang state.json kalau obrolan sudah dihapus (cegah folder yatim setelah DELETE)
-    if (!job.deleted) {
+    if (job.deleted) {
+      if (r.conversation_id) agy.deleteConversationData(r.conversation_id);
+    } else {
       if (r.conversation_id) st.conversation_id = r.conversation_id;
       if (r.usage) { st.last_usage = r.usage; st.last_model = st.model; st.last_ts = Date.now(); }
       agy.writeState(slug, st);
@@ -499,7 +615,7 @@ async function runChatJob(job, slug, prompt, st) {
       answer, model: st.model, usage: r.usage || null,
       durationSec: Math.round((Date.now() - started) / 1000),
       limit: lim ? { ...lim, resetIn: agy.extractResetIn(raw) } : null,
-      needLogin: !cancelled && (!!agy.extractLoginUrl(raw) || /not (logged|signed) in|login required|unauthenticated/i.test(raw)),
+      needLogin: !cancelled && (!!agy.extractLoginUrl(raw) || /not (logged|signed) in|login required|unauthenticated|auth(entication)? required/i.test(raw)),
     });
   } catch (e) {
     job.emit({ type: 'done', ok: false, answer: `Error: ${e.message || e}`, durationSec: Math.round((Date.now() - started) / 1000) });
@@ -562,10 +678,31 @@ app.post('/api/chat/stop', (req, res) => {
   res.json({ ok: true, stopped: jobs.stopJob(slug) });
 });
 
-// Hapus chat sepenuhnya: hentikan job, hapus container sandbox & folder sesi
+// Jawab popup pertanyaan AI (ask_question, mode acp).
+// body: { chatId, questionId, answers: { q1: '2', q1_other: '...', q2: ['1','3'] } } atau { chatId, questionId, skip: true }
+app.post('/api/chat/answer', (req, res) => {
+  const { chatId, questionId, answers, skip } = req.body || {};
+  const job = jobs.getJob(agy.slugify(chatId || 'default'));
+  const pq = job?.question;
+  if (!pq || pq.id !== questionId) return res.status(409).json({ ok: false, error: 'Pertanyaan ini sudah tidak aktif.' });
+  if (skip) { pq.finish({ action: 'decline' }, { skipped: true }); return res.json({ ok: true }); }
+  const { content, summary, error } = buildElicitationAnswer(pq.q, answers && typeof answers === 'object' ? answers : {});
+  if (error) return res.status(400).json({ ok: false, error });
+  if (!Object.keys(content).length) return res.status(400).json({ ok: false, error: 'Pilih atau tulis jawaban dulu.' });
+  pq.finish({ action: 'accept', content }, { answered: true, summary });
+  res.json({ ok: true });
+});
+
+// Hapus chat sepenuhnya: hentikan job, hapus container sandbox, folder sesi, & riwayat internal agy
 app.delete('/api/chats/:chatId', async (req, res) => {
   const slug = agy.slugify(req.params.chatId);
   if (!slug || slug === 'default') return res.status(400).json({ ok: false, error: 'chatId tidak valid' });
+  const convIds = new Set();
+  const prevState = agy.readState(slug);
+  if (prevState.conversation_id) convIds.add(prevState.conversation_id);
+  const activeJob = jobs.getJob(slug);
+  if (activeJob?.conversationId) convIds.add(activeJob.conversationId);
+
   jobs.deleteJob(slug);
   const removed = await agySandbox.resetSandbox(slug);
   const dir = path.resolve(agy.BASE, slug);
@@ -573,52 +710,60 @@ app.delete('/api/chats/:chatId', async (req, res) => {
   if (dir.startsWith(path.resolve(agy.BASE) + path.sep)) {
     try { fs.rmSync(dir, { recursive: true, force: true }); deletedDir = true; } catch (e) { console.warn('[delete]', slug, e.message); }
   }
-  res.json({ ok: true, slug, containerRemoved: removed, sessionDeleted: deletedDir });
+  let agyDataRemoved = 0;
+  for (const id of convIds) agyDataRemoved += agy.deleteConversationData(id);
+  res.json({ ok: true, slug, containerRemoved: removed, sessionDeleted: deletedDir, agyDataRemoved });
 });
 
-// reset percakapan 1 chat (hapus conversation_id)
+// reset percakapan 1 chat (hapus conversation_id & riwayat internal agy lama)
 app.post('/api/chat/reset', (req, res) => {
   const slug = agy.slugify(req.body?.chatId || 'default');
-  const st = agy.readState(slug); delete st.conversation_id; agy.writeState(slug, st);
-  res.json({ ok: true });
+  const st = agy.readState(slug);
+  const prevId = st.conversation_id;
+  delete st.conversation_id;
+  agy.writeState(slug, st);
+  const agyDataRemoved = prevId ? agy.deleteConversationData(prevId) : 0;
+  res.json({ ok: true, agyDataRemoved });
 });
 
-// ---------- QUOTA (/usage asli dari CLI) — di-cache 60 dtk per akun ----------
+// ---------- QUOTA (/usage asli dari CLI) — dedupe request bersamaan; ?refresh=1 ambil realtime ----------
 let quotaCache = { email: null, at: 0, groups: null, pending: null };
 app.get('/api/quota', async (req, res) => {
   const email = agy.whoamiEmail();
   if (!email) return res.json({ ok: false, needLogin: true });
-  const fresh = quotaCache.email === email && quotaCache.groups && Date.now() - quotaCache.at < 60_000;
+  const fresh = quotaCache.email === email && quotaCache.groups && Date.now() - quotaCache.at < 15_000;
   if (!fresh || req.query.refresh) {
-    // dedupe: request bersamaan cukup menunggu 1 eksekusi agy
+    // dedupe: request bersamaan untuk akun yang sama cukup menunggu 1 eksekusi agy
     if (!quotaCache.pending || quotaCache.email !== email) {
+      const prevGroups = quotaCache.email === email ? quotaCache.groups : null;
+      const prevAt = quotaCache.email === email ? quotaCache.at : 0;
       quotaCache.email = email;
       quotaCache.pending = agy.getQuota().then((groups) => {
         if (groups) quotaCache = { email, at: Date.now(), groups, pending: null };
-        else quotaCache.pending = null;
+        else quotaCache = { email, at: prevAt, groups: prevGroups, pending: null };
         return groups;
       });
     }
     const groups = await quotaCache.pending;
-    return res.json({ ok: !!groups, groups: groups || [] });
+    return res.json({ ok: !!groups, email, groups: groups || [], at: groups ? quotaCache.at : null });
   }
-  res.json({ ok: true, groups: quotaCache.groups, cached: true });
+  res.json({ ok: true, email, groups: quotaCache.groups, at: quotaCache.at, cached: true });
 });
 
-// ---------- LOGIN / LOGOUT ----------
-app.post('/api/login', async (req, res) => res.json(await agy.startLogin()));
-app.get('/api/login/status', (req, res) =>
+// ---------- LOGIN / LOGOUT (khusus admin jika ADMIN_TOKEN di-set) ----------
+app.post('/api/login', requireAdmin, async (req, res) => res.json(await agy.startLogin()));
+app.get('/api/login/status', requireAdmin, (req, res) =>
   res.json({ ok: true, active: agy.getLoginState(), result: agy.getLastLoginResult(), email: agy.whoamiEmail() }));
-app.post('/api/login/code', (req, res) => res.json(agy.submitLoginCode(req.body?.code || '')));
-app.post('/api/login/cancel', (req, res) => res.json(agy.cancelLogin()));
-app.post('/api/logout', (req, res) => res.json(agy.logout()));
+app.post('/api/login/code', requireAdmin, (req, res) => res.json(agy.submitLoginCode(req.body?.code || '')));
+app.post('/api/login/cancel', requireAdmin, (req, res) => res.json(agy.cancelLogin()));
+app.post('/api/logout', requireAdmin, (req, res) => res.json(agy.logout()));
 
 // ---------- SANDBOX (Docker per chat) ----------
 app.get('/api/sandbox/status', async (req, res) => {
   const slug = agy.slugify(req.query.chatId || 'default');
   res.json({ ok: true, slug, ...(await agySandbox.getSandboxInfo(slug)) });
 });
-app.post('/api/sandbox/reset', async (req, res) => {
+app.post('/api/sandbox/reset', requireAdmin, async (req, res) => {
   const slug = agy.slugify(req.body?.chatId || 'default');
   const removed = await agySandbox.resetSandbox(slug);
   // Container dibuat ulang otomatis (beserta install agy) saat chat berikutnya berjalan.
@@ -669,4 +814,4 @@ if (IDLE_MIN > 0) {
   });
 }
 
-app.listen(PORT, '0.0.0.0', () => console.log(`[server] AntiGPT + agybot logic di port ${PORT} | sandbox=${agy.SANDBOX_IMAGE} (agy dieksekusi di Docker) | auth=${process.env.AUTH_TOKEN ? '.env' : 'token sementara'} | idle-stop=${IDLE_MIN} mnt | prompt-timeout=idle ${agy.PROMPT_IDLE_MIN}m / max ${agy.PROMPT_MAX_MIN}m`));
+app.listen(PORT, '0.0.0.0', () => console.log(`[server] AntiGPT + agybot logic di port ${PORT} | sandbox=${agy.SANDBOX_IMAGE} (agy dieksekusi di Docker) | auth=${process.env.AUTH_TOKEN ? '.env' : 'token sementara'} | admin=${ADMIN_ENABLED ? '.env' : 'nonaktif'} | idle-stop=${IDLE_MIN} mnt | prompt-timeout=idle ${agy.PROMPT_IDLE_MIN}m / max ${agy.PROMPT_MAX_MIN}m`));

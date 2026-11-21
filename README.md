@@ -79,10 +79,13 @@ Variabel environment opsional:
 | `AGY_SANDBOX_PIDS` | `512` | Limit jumlah proses |
 | `AGY_TOKEN_FILE` | `server/sandbox-data/gemini/antigravity-cli/antigravity-oauth-token` | Lokasi token OAuth |
 | `AGY_SANDBOX_IDLE_MIN` | `30` | Menit idle sebelum container chat di-`docker stop` (0 = nonaktif). Di-start lagi otomatis saat dipakai |
+| `AGY_MODE` | `acp` | Mode eksekusi chat: `acp` (default, dukung popup `ask_question` & teks berpikir) atau `print` (cadangan `-p`) |
 | `AGY_PROMPT_IDLE_MIN` | `10` | Menit diam tanpa aktivitas/output sebelum 1 eksekusi AI dianggap macet & dihentikan (0 = nonaktif) |
 | `AGY_PROMPT_MAX_MIN` | `60` | Batas maksimal total durasi 1 giliran eksekusi AI dalam menit (0 = nonaktif) |
+| `AGY_QUESTION_TIMEOUT_MIN` | `30` | Batas menit menunggu jawaban popup `ask_question` sebelum dilewati otomatis (0 = tanpa batas) |
 | `AGY_MAX_PARALLEL` | `2` | Jumlah chat yang bisa diproses bersamaan |
 | `AUTH_TOKEN` | — | Token akses web/API (lihat bagian Token akses) |
+| `ADMIN_TOKEN` | — | Opsional. Kunci khusus admin untuk mengelola akun (login/ganti akun/logout) & reset sandbox |
 | `MAX_UPLOAD_FILES` | `20` | Maksimal jumlah file lampiran per kirim |
 | `MAX_UPLOAD_MB` | `100` | Maksimal ukuran per file lampiran (MB) |
 | `PORT` | `3000` | Port server |
@@ -91,8 +94,9 @@ Endpoint chat:
 
 - `POST /api/chat/stream` — mulai job (NDJSON). Job **tidak** berhenti kalau koneksi putus/refresh
 - `GET /api/chat/stream?chatId=<id>&since=<seq>` — sambung ulang & replay event job
+- `POST /api/chat/answer` `{ "chatId": "<id>", "questionId": "<qid>", "answers": { ... } }` — jawab atau lewati (`skip: true`) popup `ask_question`
 - `POST /api/chat/stop` `{ "chatId": "<id>" }` — hentikan proses agy chat tersebut
-- `DELETE /api/chats/<id>` — hapus chat: stop job, hapus container sandbox & folder sesi
+- `DELETE /api/chats/<id>` — hapus chat: stop job, hapus container sandbox, folder sesi, dan riwayat internal `agy` (`conversations/`, `brain/`, `annotations/`, `presence/`)
 
 Endpoint sandbox:
 
@@ -111,6 +115,8 @@ Saat membuka aplikasi, browser akan meminta token sekali, lalu disimpan sebagai 
 (berlaku 1 tahun). Untuk script/curl pakai header `Authorization: Bearer <token>`.
 Jika `AUTH_TOKEN` kosong, server membuat token sementara (dicetak di log, berubah tiap restart).
 Salah token > 10x dalam 15 menit per IP → diblokir sementara.
+
+Jika `ADMIN_TOKEN` diisi di `.env`, pengelolaan akun (Login, Ganti akun, Logout, dan `POST /api/sandbox/reset`) dikunci khusus pemegang `ADMIN_TOKEN`. Masuk dengan `ADMIN_TOKEN` di layar login awal otomatis membuka akses chat sekaligus admin; user biasa (pakai `AUTH_TOKEN`) tetap bisa chatting dan melihat email akun (read-only), serta bisa membuka kunci admin kapan saja dari menu **Akun** (atau lewat header `X-Admin-Token` / `Authorization: Bearer <ADMIN_TOKEN>`).
 
 ## Login
 

@@ -1,7 +1,6 @@
-import { useState, useEffect } from 'react';
-import { Moon, Type, Gauge, ChevronRight, X, Sun, Monitor, Clock, CalendarDays } from 'lucide-react';
-import { LIMITS } from '../data/models';
-import { getQuota } from '../services/ai';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Moon, Type, Gauge, ChevronRight, X, Sun, Monitor, Clock, CalendarDays, RefreshCw } from 'lucide-react';
+import { cachedQuota, isQuotaPending, loadQuota } from '../services/ai';
 
 const THEMES = [
   { id: 'light', label: 'Terang', icon: Sun },
@@ -10,12 +9,6 @@ const THEMES = [
 ];
 
 const FONTS = ['Default', 'Serif', 'Mono', 'Rounded'];
-
-// Provider saat ini: kumpulan model yang pakai provider sama
-const PROVIDERS = [
-  { id: 'gemini', name: 'Gemini' },
-  { id: 'claude', name: 'Claude & GPT', models: ['claude', 'gpt'] },
-];
 
 function Card({ icon: Icon, title, subtitle, onClick, right }) {
   return (
@@ -41,6 +34,8 @@ function ThemeCard({ theme, active, onSelect }) {
 }
 
 const WIN = { '5h': '5 jam', weekly: '1 minggu' };
+const FRESH_PREFETCH_MS = 10_000;
+
 function fmtReset(iso) {
   const ms = new Date(iso) - Date.now();
   if (!(ms > 0)) return 'segera';
@@ -48,29 +43,140 @@ function fmtReset(iso) {
   return d ? `${d} hari ${h} jam` : h ? `${h} jam ${m} menit` : `${m} menit`;
 }
 
-function LimitPanel({ onBack }) {
-  const [q, setQ] = useState(null);
+function fmtUpdatedAgo(at, now) {
+  if (!at) return '';
+  const sec = Math.max(0, Math.floor((now - at) / 1000));
+  if (sec < 15) return 'Baru saja diperbarui';
+  if (sec < 60) return `Diperbarui ${sec} dtk lalu`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `Diperbarui ${min} mnt lalu`;
+  return `Diperbarui ${Math.floor(min / 60)} jam lalu`;
+}
+
+function QuotaSkeleton() {
+  return (
+    <>
+      {[0, 1].map((g) => (
+        <section key={g} className="limit-group" aria-hidden="true">
+          <div className="skel skel-title" />
+          {[0, 1].map((r) => (
+            <div key={r} className="limit-row">
+              <span className="skel skel-icon" />
+              <span className="limit-body" style={{ flex: 1, gap: 6 }}>
+                <span className="skel skel-line" style={{ width: '52%' }} />
+                <span className="skel skel-bar" />
+                <span className="skel skel-line" style={{ width: '38%', height: 10 }} />
+              </span>
+            </div>
+          ))}
+        </section>
+      ))}
+    </>
+  );
+}
+
+function LimitPanel({ onBack, accountEmail }) {
+  const initial = cachedQuota(accountEmail);
+  const [groups, setGroups] = useState(() => initial?.groups || null);
+  const [updatedAt, setUpdatedAt] = useState(() => initial?.at || null);
+  const [refreshing, setRefreshing] = useState(() => !initial || isQuotaPending() || Date.now() - (initial.at || 0) > FRESH_PREFETCH_MS);
   const [err, setErr] = useState('');
+  const [now, setNow] = useState(() => Date.now());
+  const aliveRef = useRef(true);
   useEffect(() => {
-    getQuota().then(r => {
-      if (r.needLogin) setErr('Login dulu lewat menu Akun untuk melihat limit asli.');
-      else if (!r.ok) setErr('Gagal mengambil kuota.');
-      else setQ(r.groups);
-    }).catch(() => setErr('Gagal mengambil kuota.'));
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
   }, []);
-  if (q || err) return (
+
+  const fetchQuota = useCallback((force = true) => {
+    setRefreshing(true);
+    setErr('');
+    loadQuota({ email: accountEmail, refresh: force })
+      .then((r) => {
+        if (!aliveRef.current) return;
+        if (r.needLogin) {
+          setGroups(null);
+          setUpdatedAt(null);
+          setErr('Login dulu lewat menu Akun untuk melihat limit asli.');
+        } else if (!r.ok) {
+          setErr('Gagal mengambil kuota terbaru.');
+        } else {
+          setGroups(r.groups || []);
+          setUpdatedAt(r.at || Date.now());
+          setNow(Date.now());
+        }
+      })
+      .catch(() => { if (aliveRef.current) setErr('Gagal mengambil kuota terbaru.'); })
+      .finally(() => { if (aliveRef.current) setRefreshing(false); });
+  }, [accountEmail]);
+
+  useEffect(() => {
+    const c = cachedQuota(accountEmail);
+    if (c) { setGroups(c.groups); setUpdatedAt(c.at); }
+    else { setGroups(null); setUpdatedAt(null); }
+
+    // Jika prefetch dari saat membuka Pengaturan baru selesai (< 10 dtk) & tidak sedang berjalan, langsung pakai.
+    // Selain itu, langsung ambil kuota realtime di belakang layar.
+    const recentlyFetched = c?.at && Date.now() - c.at <= FRESH_PREFETCH_MS && !isQuotaPending();
+    if (recentlyFetched) {
+      setRefreshing(false);
+      setErr('');
+      return;
+    }
+    fetchQuota(true);
+  }, [accountEmail, fetchQuota]);
+
+  // Perbarui label "X dtk/mnt lalu" secara berkala selama panel terbuka
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const statusText = refreshing
+    ? (groups ? 'Memperbarui kuota terbaru…' : 'Mengambil kuota…')
+    : err && groups
+      ? `${err} · ${fmtUpdatedAgo(updatedAt, now)}`
+      : fmtUpdatedAgo(updatedAt, now);
+
+  return (
     <div className="settings-page">
       <div className="settings-page-head">
         <button className="settings-back" onClick={onBack} type="button" aria-label="Kembali">
           <ChevronRight size={20} style={{ transform: 'rotate(180deg)' }} />
         </button>
         <span className="settings-page-title">Limit</span>
+        <button
+          className="settings-refresh"
+          onClick={() => fetchQuota(true)}
+          type="button"
+          disabled={refreshing}
+          aria-label="Perbarui kuota"
+          title="Perbarui kuota"
+        >
+          <RefreshCw size={16} className={refreshing ? 'spin' : ''} />
+        </button>
       </div>
-      {err && <div className="limit-desc" style={{ padding: 12 }}>{err}</div>}
-      {(q || []).map(g => (
+
+      {statusText && (
+        <div className={'limit-status' + (refreshing ? ' shimmer' : '')}>{statusText}</div>
+      )}
+
+      {err && !groups && (
+        <div className="limit-empty">{err}</div>
+      )}
+
+      {!groups && refreshing && <QuotaSkeleton />}
+
+      {groups && groups.length === 0 && !refreshing && !err && (
+        <div className="limit-empty">Data kuota tidak tersedia.</div>
+      )}
+
+      {(groups || []).map((g) => (
         <section key={g.name} className="limit-group">
-          <div className="limit-group-name">{g.name === 'Gemini Models' ? 'Gemini' : g.name === 'Claude and GPT models' ? 'Claude & GPT' : g.name}</div>
-          {[...g.buckets].sort((a, b) => (a.window === '5h' ? -1 : 1)).map(b => {
+          <div className="limit-group-name">
+            {g.name === 'Gemini Models' ? 'Gemini' : g.name === 'Claude and GPT models' ? 'Claude & GPT' : g.name}
+          </div>
+          {[...g.buckets].sort((a, b) => (a.window === '5h' ? -1 : 1)).map((b) => {
             const pct = Math.round((b.remaining_fraction ?? 0) * 100);
             return (
               <div key={b.id} className="limit-row">
@@ -89,39 +195,21 @@ function LimitPanel({ onBack }) {
       ))}
     </div>
   );
-  return (
-    <div className="settings-page">
-      <div className="settings-page-head">
-        <button className="settings-back" onClick={onBack} type="button" aria-label="Kembali">
-          <ChevronRight size={20} style={{ transform: 'rotate(180deg)' }} />
-        </button>
-        <span className="settings-page-title">Limit</span>
-      </div>
-
-      {PROVIDERS.map(p => (
-        <section key={p.id} className="limit-group">
-          <div className="limit-group-name">{p.name}</div>
-          {LIMITS[p.id].map(l => (
-            <div key={l.label} className="limit-row">
-              <span className="limit-icon">
-                {l.label.includes('minggu') ? <CalendarDays size={18} /> : <Clock size={18} />}
-              </span>
-              <span className="limit-body">
-                <span className="limit-label">{l.label}</span>
-                <span className="limit-desc">{l.desc}</span>
-              </span>
-            </div>
-          ))}
-        </section>
-      ))}
-    </div>
-  );
 }
 
-export default function SettingsSheet({ open, onClose, theme, onChangeTheme, font, onChangeFont }) {
+export default function SettingsSheet({ open, onClose, theme, onChangeTheme, font, onChangeFont, accountEmail }) {
   const [page, setPage] = useState('main'); // 'main' | 'font' | 'limit'
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);
+
+  // Prefetch kuota realtime di belakang layar saat sheet Pengaturan dibuka
+  useEffect(() => {
+    if (!open || !accountEmail) return;
+    const c = cachedQuota(accountEmail);
+    if (!c?.at || Date.now() - c.at > FRESH_PREFETCH_MS) {
+      loadQuota({ email: accountEmail, refresh: true }).catch(() => {});
+    }
+  }, [open, accountEmail]);
 
   // Animasi smooth buka & tutup (sheet tetap ter-mount saat transisi keluar)
   useEffect(() => {
@@ -180,7 +268,7 @@ export default function SettingsSheet({ open, onClose, theme, onChangeTheme, fon
           </div>
         )}
 
-        {page === 'limit' && <LimitPanel onBack={() => setPage('main')} />}
+        {page === 'limit' && <LimitPanel onBack={() => setPage('main')} accountEmail={accountEmail} />}
       </div>
     </>
   );

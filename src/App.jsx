@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { MessageCircleQuestion } from 'lucide-react';
 import './App.css';
 import Header from './components/Header';
 import Welcome from './components/Welcome';
@@ -7,6 +8,7 @@ import ChatInput from './components/ChatInput';
 import Drawer from './components/Drawer';
 import AttachSheet from './components/AttachSheet';
 import ModelSheet from './components/ModelSheet';
+import QuestionSheet from './components/QuestionSheet';
 import SettingsSheet from './components/SettingsSheet';
 import AccountSheet from './components/AccountSheet';
 import AuthGate from './components/AuthGate';
@@ -16,7 +18,7 @@ import { isEditableImage } from './services/imageEdit';
 import { useChats } from './hooks/useChats';
 import {
   apiStatus, authCheck, AUTH_EVENT, startChatStream, resumeChatStream, formatDone,
-  stopChat as apiStopChat, deleteChatOnServer, cachedModels, loadModels,
+  stopChat as apiStopChat, answerQuestion as apiAnswerQuestion, deleteChatOnServer, cachedModels, loadModels,
 } from './services/ai';
 import { MODELS, DEFAULT_MODEL, DEFAULT_UPLOAD_LIMITS } from './data/models';
 
@@ -43,6 +45,10 @@ export default function App() {
   const [preview, setPreview] = useState(null);
   // status proses per chat (bukan global), supaya tombol stop tidak ikut ke chat lain
   const [loadingIds, setLoadingIds] = useState(() => new Set());
+  // pertanyaan interaktif AI (ask_question) yang sedang menunggu jawaban per chat: { [chatId]: question }
+  const [pendingQuestions, setPendingQuestions] = useState({});
+  // ID pertanyaan yang sedang diminimize user agar bisa membaca chat sebelum menjawab
+  const [dismissedQuestionId, setDismissedQuestionId] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [account, setAccount] = useState(null);
@@ -51,11 +57,24 @@ export default function App() {
   const abortRef = useRef(new Map()); // chatId -> AbortController (koneksi stream di browser)
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+  const activeQuestion = activeId ? (pendingQuestions[activeId] || null) : null;
+  const questionOpen = !!activeQuestion && dismissedQuestionId !== activeQuestion.id;
+  const questionOpenRef = useRef({ open: false, id: null });
+  questionOpenRef.current = { open: questionOpen, id: activeQuestion?.id || null };
   const setChatLoading = (id, on) => setLoadingIds(prev => {
     const next = new Set(prev);
     if (on) next.add(id); else next.delete(id);
     return next;
   });
+  const clearChatQuestion = useCallback((id, qid = null) => {
+    setPendingQuestions(prev => {
+      if (!prev[id]) return prev;
+      if (qid && prev[id].id !== qid) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, []);
 
   // ---- auth ----
   useEffect(() => {
@@ -112,8 +131,14 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event) => {
+      if (event.key !== 'Escape') return;
+      if (questionOpenRef.current.open) {
+        event.preventDefault();
+        setDismissedQuestionId(questionOpenRef.current.id);
+        return;
+      }
       const id = activeIdRef.current;
-      if (event.key === 'Escape' && id && abortRef.current.has(id)) {
+      if (id && abortRef.current.has(id)) {
         event.preventDefault();
         stopChat(id);
       }
@@ -141,7 +166,7 @@ export default function App() {
         if (ev.seq <= lastSeq) return; // event duplikat saat replay
         lastSeq = ev.seq;
       }
-      if (needReset) { needReset = false; upd(() => ({ content: '', steps: [] })); }
+      if (needReset) { needReset = false; clearChatQuestion(id); upd(() => ({ content: '', steps: [] })); }
       if (ev.type === 'uploads') {
         // tempel lokasi file di server ke lampiran pesan user (urutan sama dengan saat dikirim)
         updateLastUserMessage(id, m => {
@@ -154,13 +179,30 @@ export default function App() {
       }
       if (ev.type === 'queued') upd(() => ({ status: 'Menunggu antrean…' }));
       else if (ev.type === 'start') upd(() => ({ status: 'Berpikir…' }));
-      else if (ev.type === 'step') upd(m => {
+      else if (ev.type === 'status' && ev.text) upd(() => ({ status: ev.text }));
+      else if (ev.type === 'thought') upd(m => {
         const steps = (m.steps || []).slice();
+        const k = steps.findIndex(s => s.id === ev.id);
+        if (k >= 0) steps[k] = { ...steps[k], text: (steps[k].text || '') + ev.text };
+        else steps.push({ id: ev.id, kind: 'think', label: 'Berpikir', text: ev.text, status: 'running' });
+        return { steps, status: 'Berpikir…' };
+      });
+      else if (ev.type === 'step') upd(m => {
+        const steps = (m.steps || []).map(s => (s.kind === 'think' && s.status === 'running' ? { ...s, status: 'done' } : s));
         const k = steps.findIndex(s => s.id === ev.step.id);
         if (k >= 0) steps[k] = { ...steps[k], ...ev.step }; else steps.push(ev.step);
         const st = ev.step.status === 'running' ? ev.step.label : 'Berpikir…';
         return { steps, status: st };
       });
+      else if (ev.type === 'question' && ev.question) {
+        setPendingQuestions(prev => ({ ...prev, [id]: ev.question }));
+        setDismissedQuestionId(prev => (prev === ev.question.id ? null : prev));
+        upd(() => ({ status: 'Menunggu jawabanmu…' }));
+      }
+      else if (ev.type === 'question_done') {
+        clearChatQuestion(id, ev.id);
+        upd(() => ({ status: 'Berpikir…' }));
+      }
       else if (ev.type === 'delta') upd(m => ({ content: (m.content || '') + ev.text, status: 'Menulis jawaban…' }));
     };
 
@@ -202,6 +244,7 @@ export default function App() {
       else upd(m => ({ content: (m.content ? m.content + '\n\n' : '') + 'Error: ' + err.message, streaming: false, durationSec: Math.round((Date.now() - (m.startedAt || t0)) / 1000) }));
     } finally {
       if (abortRef.current.get(id) === controller) abortRef.current.delete(id);
+      clearChatQuestion(id);
       setChatLoading(id, false);
     }
   }
@@ -241,10 +284,22 @@ export default function App() {
 
   const handleDelete = (id) => {
     abortRef.current.get(id)?.abort();
+    clearChatQuestion(id);
     deleteChat(id);
     if (id === activeId) setActiveId(null);
     // hapus container sandbox + folder sesi di server
     deleteChatOnServer(id).catch(() => {});
+  };
+
+  const handleAnswerQuestion = async (answers) => {
+    if (!activeId || !activeQuestion) return;
+    await apiAnswerQuestion({ chatId: activeId, questionId: activeQuestion.id, answers });
+    clearChatQuestion(activeId, activeQuestion.id);
+  };
+  const handleSkipQuestion = async () => {
+    if (!activeId || !activeQuestion) return;
+    await apiAnswerQuestion({ chatId: activeId, questionId: activeQuestion.id, skip: true });
+    clearChatQuestion(activeId, activeQuestion.id);
   };
 
   const uploadLimits = account?.limits || DEFAULT_UPLOAD_LIMITS;
@@ -332,10 +387,31 @@ export default function App() {
       />
 
       <main className="content">
-        {active ? <ChatView messages={active.messages} chatId={active.id} /> : <Welcome name={USER_NAME} />}
+        {active ? (
+          <ChatView
+            messages={active.messages}
+            chatId={active.id}
+            hasPendingQuestion={!!activeQuestion}
+            onOpenQuestion={() => setDismissedQuestionId(null)}
+          />
+        ) : <Welcome name={USER_NAME} />}
       </main>
 
       <div className="input-wrap">
+        {activeQuestion && !questionOpen && (
+          <button
+            type="button"
+            className="question-banner"
+            onClick={() => setDismissedQuestionId(null)}
+          >
+            <MessageCircleQuestion size={18} />
+            <span className="question-banner-text">
+              <strong>AI menunggu jawabanmu</strong>
+              <small>{activeQuestion.fields?.[0]?.title || activeQuestion.message || 'Ketuk untuk menjawab'}</small>
+            </span>
+            <span className="question-banner-cta">Jawab</span>
+          </button>
+        )}
         <ChatInput
           isNewChat={!active}
           modelName={modelName} attachments={attachments}
@@ -374,10 +450,19 @@ export default function App() {
       <ModelSheet open={sheet === 'model'} onClose={() => setSheet(null)}
         model={chatModel} list={models} onOpen={() => refreshModels(false)} onChangeModel={changeModel} />
 
+      <QuestionSheet
+        open={questionOpen}
+        question={activeQuestion}
+        onMinimize={() => activeQuestion && setDismissedQuestionId(activeQuestion.id)}
+        onSubmit={handleAnswerQuestion}
+        onSkip={handleSkipQuestion}
+      />
+
       <SettingsSheet
         open={settingsOpen} onClose={() => setSettingsOpen(false)}
         theme={theme} onChangeTheme={setTheme}
         font={font} onChangeFont={setFont}
+        accountEmail={account?.email}
       />
 
       <AccountSheet open={accountOpen} onClose={() => setAccountOpen(false)} onChanged={setAccount} />

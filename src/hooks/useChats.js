@@ -5,7 +5,7 @@ const SAVE_INTERVAL = 1000; // simpan paling sering 1x per detik (bukan tiap pot
 export const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
 // Kurangi ukuran sebelum disimpan: output tool (bisa 1.5KB per langkah) hanya dipertahankan
-// untuk beberapa pesan terakhir per chat. Mode agresif membuang semua output tool.
+// untuk beberapa pesan terakhir per chat. Mode agresif (saat QuotaExceeded) juga memangkas teks berpikir lama.
 function compact(chats, aggressive = false) {
   const KEEP = aggressive ? 0 : 6;
   return chats.map(chat => {
@@ -14,7 +14,17 @@ function compact(chats, aggressive = false) {
       ...chat,
       messages: (chat.messages || []).map((m, i) => {
         if (!m.steps?.length || i >= n - KEEP) return m;
-        return { ...m, steps: m.steps.map(s => (s.output ? { ...s, output: null } : s)) };
+        return {
+          ...m,
+          steps: m.steps.map(s => {
+            let next = s;
+            if (next.output) next = { ...next, output: null };
+            if (aggressive && next.text && next.text.length > 400) {
+              next = { ...next, text: next.text.slice(0, 400) + '…' };
+            }
+            return next;
+          }),
+        };
       }),
     };
   });

@@ -161,6 +161,7 @@ async function ensureSandboxOnce(slug) {
  *   - timeoutMs     : batas total waktu jalan (ms)
  *   - idleTimeoutMs : batas diam tanpa output stdout/stderr (ms) — di-reset tiap ada chunk data
  *   - onTimeout(reason, slug) : dipanggil sekali saat salah satu timeout tercapai ('idle' | 'max')
+ * child yang dikembalikan punya pauseTimers() / resumeTimers() untuk menjeda timeout sementara.
  */
 export async function spawnInSandbox(slug, argv, { timeoutMs, idleTimeoutMs, onTimeout } = {}) {
   const containerName = await ensureSandbox(slug);
@@ -170,8 +171,11 @@ export async function spawnInSandbox(slug, argv, { timeoutMs, idleTimeoutMs, onT
   touchSandbox(slug);
 
   let finished = false;
+  let paused = false;
   let maxTimer = null;
   let idleTimer = null;
+  let maxRemaining = timeoutMs || 0;
+  let maxStartedAt = Date.now();
   const clearTimers = () => {
     if (maxTimer) { clearTimeout(maxTimer); maxTimer = null; }
     if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
@@ -184,12 +188,34 @@ export async function spawnInSandbox(slug, argv, { timeoutMs, idleTimeoutMs, onT
     try { onTimeout && onTimeout(reason, slug); } catch {}
   };
   const armIdle = () => {
-    if (!idleTimeoutMs || finished) return;
+    if (!idleTimeoutMs || finished || paused) return;
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => triggerTimeout('idle'), idleTimeoutMs);
   };
 
   if (timeoutMs) maxTimer = setTimeout(() => triggerTimeout('max'), timeoutMs);
+  // Jeda semua timeout selama menunggu input user (mis. popup ask_question), lalu lanjutkan sisa waktunya.
+  child.pauseTimers = () => {
+    if (finished || paused) return;
+    paused = true;
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    if (maxTimer) { clearTimeout(maxTimer); maxTimer = null; maxRemaining -= Date.now() - maxStartedAt; }
+  };
+  child.resumeTimers = () => {
+    if (finished || !paused) return;
+    paused = false;
+    touchSandbox(slug);
+    if (timeoutMs) {
+      maxStartedAt = Date.now();
+      maxTimer = setTimeout(() => triggerTimeout('max'), Math.max(5000, maxRemaining));
+    }
+    armIdle();
+  };
+  child.bumpIdle = () => {
+    if (finished || paused) return;
+    touchSandbox(slug);
+    armIdle();
+  };
   if (idleTimeoutMs) {
     armIdle();
     const bump = () => { touchSandbox(slug); armIdle(); };

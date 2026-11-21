@@ -36,10 +36,16 @@ export async function authLogin(token) {
   catch (e) { return { ok: false, error: e.body?.error || e.message }; }
 }
 export const authLogout = () => post('/api/auth/logout');
+export async function adminLogin(token) {
+  try { return await post('/api/admin/auth', { token }); }
+  catch (e) { return { ok: false, error: e.body?.error || e.message }; }
+}
+export const adminLogout = () => post('/api/admin/logout');
 
 export const apiStatus = () => jfetch('/api/status');
 export const getModels = () => jfetch('/api/models');
-export const getQuota = () => jfetch('/api/quota');
+export const getQuota = ({ refresh = false } = {}) =>
+  jfetch('/api/quota' + (refresh ? '?refresh=1' : ''));
 export const chatFileUrl = (chatId, filename) => `${BASE}/api/chats/${encodeURIComponent(chatId)}/files/${encodeURIComponent(filename)}`;
 export const chatImageUrl = (chatId, filename) => `${BASE}/api/chats/${encodeURIComponent(chatId)}/images/${encodeURIComponent(filename)}`;
 
@@ -50,6 +56,8 @@ export const loginCancel = () => post('/api/login/cancel');
 export const logout = () => post('/api/logout');
 export const resetChat = (chatId) => post('/api/chat/reset', { chatId });
 export const stopChat = (chatId) => post('/api/chat/stop', { chatId });
+export const answerQuestion = ({ chatId, questionId, answers, skip = false }) =>
+  post('/api/chat/answer', { chatId, questionId, answers, skip });
 export const deleteChatOnServer = (chatId) =>
   jfetch(`/api/chats/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
 
@@ -78,8 +86,45 @@ export async function loadModels({ email, force = false } = {}) {
   return modelsPending;
 }
 
+// ---------- kuota (cache sessionStorage hanya untuk tampilan awal sambil auto-refresh realtime) ----------
+const QUOTA_KEY = 'quota_cache_v1';
+export function cachedQuota(email) {
+  try {
+    const c = JSON.parse(sessionStorage.getItem(QUOTA_KEY) || 'null');
+    if (!c || !Array.isArray(c.groups)) return null;
+    if (email !== undefined && c.email !== email) return null;
+    return c;
+  } catch { return null; }
+}
+let quotaPending = null;
+let quotaPendingEmail = undefined;
+export const isQuotaPending = () => !!quotaPending;
+export async function loadQuota({ email, refresh = true } = {}) {
+  if (!quotaPending || quotaPendingEmail !== email) {
+    quotaPendingEmail = email;
+    const p = getQuota({ refresh })
+      .then((r) => {
+        if (r.needLogin) {
+          try { sessionStorage.removeItem(QUOTA_KEY); } catch {}
+          return r;
+        }
+        if (r.ok && Array.isArray(r.groups)) {
+          const entry = { email: r.email ?? email ?? null, at: r.at || Date.now(), groups: r.groups };
+          try { sessionStorage.setItem(QUOTA_KEY, JSON.stringify(entry)); } catch {}
+          return { ...r, at: entry.at };
+        }
+        return r;
+      })
+      .finally(() => {
+        if (quotaPending === p) { quotaPending = null; quotaPendingEmail = undefined; }
+      });
+    quotaPending = p;
+  }
+  return quotaPending;
+}
+
 // ---------- streaming chat (NDJSON) ----------
-// event: {type:'queued'|'start'|'step'|'delta'|'done'|'none'|'ping', seq?, ...}
+// event: {type:'queued'|'start'|'step'|'thought'|'delta'|'question'|'question_done'|'done'|'none'|'ping', seq?, ...}
 // Mengembalikan { done, none }. Kalau stream putus di tengah jalan → { done: null } (bukan throw),
 // supaya pemanggil bisa menyambung ulang. fetch yang gagal total / AbortError tetap di-throw.
 async function readNdjson(r, onEvent) {

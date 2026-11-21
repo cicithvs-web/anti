@@ -1,6 +1,6 @@
 import { Children, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArrowDown, Check, Clock, Copy, ChevronRight, Download, File, ImageOff } from 'lucide-react';
-import ProcessSheet, { fmtDur } from './ProcessSheet';
+import { Archive, ArrowDown, Check, Copy, Download, File, ImageOff } from 'lucide-react';
+import ThinkingProcess from './ThinkingProcess';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { chatFileUrl, chatImageUrl } from '../services/ai';
@@ -147,34 +147,6 @@ function Markdown({ text, chatId }) {
   return <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={safeMarkdownUrl}>{text}</ReactMarkdown>;
 }
 
-// Baris ringkas di atas jawaban AI: "🕒 <status/langkah terakhir> >" — tap untuk buka Ringkasan
-function ProcessRow({ m, onOpen }) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (!m.streaming) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [m.streaming]);
-
-  const tools = (m.steps || []).filter(s => s.kind !== 'think');
-  let label;
-  if (m.streaming) {
-    const secs = m.startedAt ? Math.round((now - m.startedAt) / 1000) : 0;
-    label = `${m.status || 'Berpikir…'} ${secs ? '· ' + secs + ' dtk' : ''}`;
-  } else {
-    const last = tools[tools.length - 1];
-    label = last ? `${last.label}${tools.length > 1 ? ` (+${tools.length - 1} langkah)` : ''}`
-      : `Berpikir${m.durationSec != null ? ' selama ' + fmtDur(m.durationSec) : ''}`;
-  }
-  return (
-    <button className={'proc-row' + (m.streaming ? ' live' : '')} onClick={onOpen}>
-      <Clock size={16} className={m.streaming ? 'spin-slow' : ''} />
-      <span className={'proc-row-text' + (m.streaming ? ' shimmer' : '')}>{label}</span>
-      <ChevronRight size={16} />
-    </button>
-  );
-}
-
 // Lampiran pesan terkirim: gambar yang tersimpan di server → thumbnail (tap = lightbox),
 // selain itu (atau gambar lama tanpa info lokasi / file sudah terhapus) → kartu file.
 function SentAttachments({ items, chatId, onOpenImage }) {
@@ -195,13 +167,15 @@ function SentAttachments({ items, chatId, onOpenImage }) {
 
 // Satu pesan. Di-memo: saat streaming hanya pesan terakhir (objeknya berubah) yang dirender ulang,
 // pesan lama tidak di-parse ulang oleh react-markdown.
-const MessageItem = memo(function MessageItem({ m, index, chatId, onOpen, onOpenImage }) {
+const MessageItem = memo(function MessageItem({ m, chatId, hasPendingQuestion, onOpenQuestion, onOpenImage }) {
   return (
     <div className={'msg ' + (m.role === 'user' ? 'msg-user' : 'msg-ai')}>
       {m.attachments?.length > 0 && (
         <SentAttachments items={m.attachments} chatId={chatId} onOpenImage={onOpenImage} />
       )}
-      {m.role === 'assistant' && m.steps && <ProcessRow m={m} onOpen={() => onOpen(index)} />}
+      {m.role === 'assistant' && (m.steps || m.streaming) && (
+        <ThinkingProcess msg={m} hasPendingQuestion={hasPendingQuestion} onOpenQuestion={onOpenQuestion} />
+      )}
       {(m.content || m.role === 'user') && (
         m.role === 'user'
           ? <div className="bubble">{m.content}</div>
@@ -213,62 +187,86 @@ const MessageItem = memo(function MessageItem({ m, index, chatId, onOpen, onOpen
 
 const NEAR_BOTTOM_PX = 80;
 
-export default function ChatView({ messages, chatId }) {
-  const endRef = useRef(null);
+export default function ChatView({ messages, chatId, hasPendingQuestion, onOpenQuestion }) {
   const boxRef = useRef(null);
+  const viewRef = useRef(null);
   const stickRef = useRef(true);     // auto-scroll hanya kalau user memang di (dekat) bawah
   const prevLenRef = useRef(messages.length);
   const [atBottom, setAtBottom] = useState(true);
-  const [openIdx, setOpenIdx] = useState(null);
   const [lightbox, setLightbox] = useState(null);
   const closeLightbox = useCallback(() => setLightbox(null), []);
-  const getBox = () => boxRef.current || (boxRef.current = endRef.current?.closest('.content') || null);
 
   useEffect(() => {
-    const box = getBox();
+    const box = boxRef.current;
+    const view = viewRef.current;
     if (!box) return;
+    const checkNear = () => box.scrollHeight - box.scrollTop - box.clientHeight < NEAR_BOTTOM_PX;
     const onScroll = () => {
-      const near = box.scrollHeight - box.scrollTop - box.clientHeight < NEAR_BOTTOM_PX;
+      const near = checkNear();
       stickRef.current = near;
       setAtBottom(near);
     };
+    const onResize = () => {
+      const near = checkNear();
+      if (near) stickRef.current = true;
+      setAtBottom(near);
+    };
     box.addEventListener('scroll', onScroll, { passive: true });
-    return () => box.removeEventListener('scroll', onScroll);
+    let ro = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(onResize);
+      ro.observe(box);
+      if (view) ro.observe(view);
+    }
+    return () => {
+      box.removeEventListener('scroll', onScroll);
+      ro?.disconnect();
+    };
   }, []);
 
   // Pindah chat → selalu mulai dari bawah
   useLayoutEffect(() => {
-    const box = getBox();
+    const box = boxRef.current;
     stickRef.current = true;
     setAtBottom(true);
-    setOpenIdx(null);
     setLightbox(null);
     if (box) box.scrollTop = box.scrollHeight;
   }, [chatId]);
 
   useLayoutEffect(() => {
-    const box = getBox();
+    const box = boxRef.current;
     // pesan baru dari user → paksa ikut ke bawah
     const added = messages.slice(prevLenRef.current);
     prevLenRef.current = messages.length;
     if (added.some(m => m.role === 'user')) stickRef.current = true;
     if (box && stickRef.current) box.scrollTop = box.scrollHeight; // instan (tanpa smooth) supaya tidak patah-patah
+    if (box) setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < NEAR_BOTTOM_PX);
     if (window.scrollY) window.scrollTo(0, 0);
   }, [messages]);
 
   const scrollToBottom = () => {
-    const box = getBox();
+    const box = boxRef.current;
     if (!box) return;
     stickRef.current = true;
     box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
   };
 
   return (
-    <div className="chat-view">
-      {messages.map((m, i) => (
-        <MessageItem key={m.id ?? i} m={m} index={i} chatId={chatId} onOpen={setOpenIdx} onOpenImage={setLightbox} />
-      ))}
-      <div ref={endRef} />
+    <div className="chat-shell">
+      <div className="chat-scroll" ref={boxRef}>
+        <div className="chat-view" ref={viewRef}>
+          {messages.map((m, i) => (
+            <MessageItem
+              key={m.id ?? i}
+              m={m}
+              chatId={chatId}
+              hasPendingQuestion={hasPendingQuestion && i === messages.length - 1}
+              onOpenQuestion={onOpenQuestion}
+              onOpenImage={setLightbox}
+            />
+          ))}
+        </div>
+      </div>
       {!atBottom && (
         <div className="scroll-bottom-wrap">
           <button type="button" className="scroll-bottom" onClick={scrollToBottom} aria-label="Ke pesan terbaru">
@@ -277,7 +275,6 @@ export default function ChatView({ messages, chatId }) {
         </div>
       )}
       <ImageLightbox item={lightbox} onClose={closeLightbox} />
-      <ProcessSheet open={openIdx != null} msg={openIdx != null ? messages[openIdx] : null} onClose={() => setOpenIdx(null)} />
     </div>
   );
 }
