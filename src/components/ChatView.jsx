@@ -1,16 +1,64 @@
-import { Children, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArrowDown, Check, Copy, Download, File, ImageOff } from 'lucide-react';
+import { Children, isValidElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  Archive, ArrowDown, Check, Copy, Download, File, ImageOff,
+  Info, Lightbulb, MessageSquareWarning, AlertTriangle, OctagonAlert,
+} from 'lucide-react';
 import ThinkingProcess from './ThinkingProcess';
+import MermaidDiagram from './MermaidDiagram';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import 'katex/dist/katex.min.css';
+import { preprocessLatex, REMARK_PLUGINS, REHYPE_PLUGINS } from '../utils/markdownPlugins';
 import { chatFileUrl, chatImageUrl } from '../services/ai';
 import { FileCard, ImageThumb, keyOf } from './AttachmentTray.jsx';
 import ImageLightbox from './ImageLightbox.jsx';
 
+const ALERT_META = {
+  note: { label: 'Catatan', Icon: Info },
+  tip: { label: 'Tips', Icon: Lightbulb },
+  important: { label: 'Penting', Icon: MessageSquareWarning },
+  warning: { label: 'Peringatan', Icon: AlertTriangle },
+  caution: { label: 'Perhatian', Icon: OctagonAlert },
+};
+
+// Ekstrak teks polos secara rekursif (aman untuk anak <code> yang sudah di-highlight jadi banyak <span>)
+function extractText(node) {
+  if (node == null || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(extractText).join('');
+  if (isValidElement(node)) return extractText(node.props?.children);
+  return '';
+}
+
+function extractCodeMeta(children) {
+  let lang = '';
+  for (const child of Children.toArray(children)) {
+    if (isValidElement(child)) {
+      const cls = String(child.props?.className || '');
+      const m = /(?:^|\s)language-([a-zA-Z0-9_+-]+)/.exec(cls);
+      if (m) { lang = m[1].toLowerCase(); break; }
+    }
+  }
+  const code = extractText(children).replace(/\n$/, '');
+  return { lang, code };
+}
+
+function AlertBlockquote({ children, ...props }) {
+  const kind = props['data-alert'];
+  const meta = kind ? ALERT_META[kind] : null;
+  if (!meta) return <blockquote>{children}</blockquote>;
+  const { label, Icon } = meta;
+  return (
+    <div className={`md-alert md-alert-${kind}`} role="note">
+      <div className="md-alert-title"><Icon size={15} /><span>{label}</span></div>
+      <div className="md-alert-body">{children}</div>
+    </div>
+  );
+}
+
 // Link file:// (path lokal server) nggak bisa dibuka di HP -> tampilkan sebagai teks biasa
-const mdComponents = {
+const baseMdComponents = {
   table: ({ children }) => <div className="md-table-wrap"><table>{children}</table></div>,
-  pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+  blockquote: AlertBlockquote,
 };
 
 function resolveLocalFilename(href) {
@@ -75,22 +123,19 @@ function ChatFileCard({ filename, chatId }) {
   );
 }
 
-function CodeBlock({ children }) {
+function CodeBlock({ children, lang = '', code = '' }) {
   const [status, setStatus] = useState('idle');
-  const code = Children.toArray(children).map(child => {
-    if (typeof child === 'string') return child;
-    return typeof child?.props?.children === 'string' ? child.props.children : '';
-  }).join('');
+  const plainCode = code || extractText(children);
 
   async function handleCopy() {
     try {
       if (navigator.clipboard?.writeText) {
         try {
-          await navigator.clipboard.writeText(code);
+          await navigator.clipboard.writeText(plainCode);
         } catch {
           // Gunakan fallback untuk browser yang menolak Clipboard API.
           const textarea = document.createElement('textarea');
-          textarea.value = code;
+          textarea.value = plainCode;
           textarea.setAttribute('readonly', '');
           textarea.style.position = 'fixed';
           textarea.style.opacity = '0';
@@ -102,7 +147,7 @@ function CodeBlock({ children }) {
         }
       } else {
         const textarea = document.createElement('textarea');
-        textarea.value = code;
+        textarea.value = plainCode;
         textarea.setAttribute('readonly', '');
         textarea.style.position = 'fixed';
         textarea.style.opacity = '0';
@@ -122,6 +167,7 @@ function CodeBlock({ children }) {
   return (
     <div className="md-code-wrap">
       <div className="md-code-toolbar">
+        <span className="md-code-lang">{lang || ''}</span>
         <button type="button" className="md-code-copy" onClick={handleCopy} aria-label="Salin kode">
           {status === 'copied' ? <Check size={14} /> : <Copy size={14} />}
           <span>{status === 'copied' ? 'Tersalin' : status === 'error' ? 'Gagal' : 'Salin'}</span>
@@ -132,9 +178,15 @@ function CodeBlock({ children }) {
   );
 }
 
-function Markdown({ text, chatId }) {
+function Markdown({ text, chatId, streaming = false }) {
+  const processed = useMemo(() => preprocessLatex(text), [text]);
   const components = useMemo(() => ({
-    ...mdComponents,
+    ...baseMdComponents,
+    pre: ({ children }) => {
+      const { lang, code } = extractCodeMeta(children);
+      if (lang === 'mermaid') return <MermaidDiagram code={code} streaming={streaming} />;
+      return <CodeBlock lang={lang} code={code}>{children}</CodeBlock>;
+    },
     a: ({ href = '', children }) => {
       if (/^https?:\/\//i.test(href)) return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
       const filename = resolveLocalFilename(href);
@@ -143,8 +195,17 @@ function Markdown({ text, chatId }) {
         : <span className="md-filelink">{children}</span>;
     },
     img: ({ src = '', alt = '' }) => <ChatImage src={src} alt={alt} chatId={chatId} />,
-  }), [chatId]);
-  return <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={safeMarkdownUrl}>{text}</ReactMarkdown>;
+  }), [chatId, streaming]);
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      components={components}
+      urlTransform={safeMarkdownUrl}
+    >
+      {processed}
+    </ReactMarkdown>
+  );
 }
 
 // Lampiran pesan terkirim: gambar yang tersimpan di server → thumbnail (tap = lightbox),
@@ -179,7 +240,7 @@ const MessageItem = memo(function MessageItem({ m, chatId, hasPendingQuestion, o
       {(m.content || m.role === 'user') && (
         m.role === 'user'
           ? <div className="bubble">{m.content}</div>
-          : <div className="bubble md"><Markdown text={m.content} chatId={chatId} />{m.streaming && m.content ? <span className="caret" /> : null}</div>
+          : <div className="bubble md"><Markdown text={m.content} chatId={chatId} streaming={!!m.streaming} />{m.streaming && m.content ? <span className="caret" /> : null}</div>
       )}
     </div>
   );
