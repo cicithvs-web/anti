@@ -273,6 +273,7 @@ export function agyPromptAcp(slug, text, model, conversationId, onEvent, signal,
     }
     let out = '';
     const appendOut = (s) => { out += s; if (out.length > MAX_RAW_OUT) out = out.slice(-MAX_RAW_OUT); };
+    proc.stdin?.on('error', () => {});
     proc.stderr.on('data', (d) => appendOut(d.toString()));
     let closed = false;
     const closedP = new Promise((r) => proc.on('close', () => { closed = true; r(); }));
@@ -432,6 +433,7 @@ export async function startLogin() {
   lastLoginResult = null;
   const st = loginState;
   let out = '';
+  proc.stdin?.on('error', () => {});
   proc.stdout.on('data', (d) => {
     out += d;
     if (!st.url) { const u = extractLoginUrl(out); if (u) { st.url = u; st.status = 'waiting'; } }

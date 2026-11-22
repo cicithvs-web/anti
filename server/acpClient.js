@@ -104,6 +104,7 @@ export function inspectBackgroundState(brainDir, convId, baseline, now, tracker,
   const pendingTasks = new Set();
   const subagents = new Map(); // subId -> { createdAt, killed }
   const receivedFrom = new Map(); // senderId -> { lastIdx, count }
+  let sawBackgroundWork = false;
 
   for (let i = 0; i < steps.length; i++) {
     const st = steps[i];
@@ -144,7 +145,10 @@ export function inspectBackgroundState(brainDir, convId, baseline, now, tracker,
           break;
         }
       }
-      if (!isDaemon) pendingTasks.add(tid);
+      if (!isDaemon) {
+        pendingTasks.add(tid);
+        sawBackgroundWork = true;
+      }
     }
 
     // Subagent dibuat (invoke_subagent)
@@ -155,6 +159,7 @@ export function inspectBackgroundState(brainDir, convId, baseline, now, tracker,
         if (!subagents.has(sid)) {
           if (!tracker.subFirstSeen.has(sid)) tracker.subFirstSeen.set(sid, now);
           subagents.set(sid, { killed: false });
+          sawBackgroundWork = true;
         }
       }
     }
@@ -168,9 +173,13 @@ export function inspectBackgroundState(brainDir, convId, baseline, now, tracker,
         const prev = receivedFrom.get(sender);
         receivedFrom.set(sender, { lastIdx: i, count: (prev?.count || 0) + 1 });
         pendingTasks.delete(sender);
+        sawBackgroundWork = true;
       }
       const fin = /Task id "([^"]+)" (?:finished|failed|cancelled|stopped)/g;
-      while ((m = fin.exec(content)) !== null) pendingTasks.delete(m[1]);
+      while ((m = fin.exec(content)) !== null) {
+        pendingTasks.delete(m[1]);
+        sawBackgroundWork = true;
+      }
     }
   }
 
@@ -220,7 +229,11 @@ export function inspectBackgroundState(brainDir, convId, baseline, now, tracker,
     }
   }
 
-  // 3. Cek apakah parent sudah selesai memproses pesan terakhir (termasuk wakeup dari subagent/task)
+  // 3. Cek apakah parent sudah selesai memproses pesan terakhir (wakeup dari subagent/task).
+  // Hanya berlaku bila giliran ini memang pernah meluncurkan background task / subagent;
+  // jika tidak (mis. error kuota 429 yang tidak menulis PLANNER_RESPONSE ke transcript.jsonl),
+  // jangan menahan koneksi di waitForBackgroundIdle.
+  if (!sawBackgroundWork) return { busy: false, maxMtimeMs };
   const lastIdx = steps.length - 1;
   const lastStep = steps[lastIdx];
   if (!isTerminalStep(lastStep)) return { busy: true, maxMtimeMs };
@@ -325,12 +338,21 @@ export function runAcpTurn(proc, opts) {
     const pending = new Map();      // id request kita → { res, rej }
     const tools = new Map();        // toolCallId → state gabungan + waktu mulai
 
-    const write = (m) => { try { proc.stdin.write(JSON.stringify(m) + '\n'); } catch {} };
+    // Cegah uncaught EPIPE jika proses agy sudah mati saat menulis session/cancel atau request
+    proc.stdin?.on('error', () => {});
+    const write = (m) => {
+      if (!proc.stdin || proc.stdin.destroyed || !proc.stdin.writable) return;
+      try { proc.stdin.write(JSON.stringify(m) + '\n'); } catch {}
+    };
     const clearBgTimer = () => { if (bgTimer) { clearInterval(bgTimer); bgTimer = null; } };
+    const onSignalAbort = () => {
+      if (!settled && sessionId) write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } });
+    };
     const finish = (r) => {
       if (settled) return;
       settled = true;
       clearBgTimer();
+      signal?.removeEventListener('abort', onSignalAbort);
       for (const p of pending.values()) p.rej(new Error('ACP ditutup'));
       pending.clear();
       resolve(r);
@@ -484,9 +506,7 @@ export function runAcpTurn(proc, opts) {
       error: `agy acp berhenti (code ${code ?? '?'})`, closed: true,
     }));
     proc.on('error', (e) => finish({ status: 'ERROR', response: response || String(e.message || e), conversation_id: sessionId, error: String(e) }));
-    signal?.addEventListener('abort', () => {
-      if (sessionId) write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } });
-    }, { once: true });
+    signal?.addEventListener('abort', onSignalAbort, { once: true });
 
     (async () => {
       try {
