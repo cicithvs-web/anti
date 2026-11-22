@@ -47,6 +47,7 @@ export const getModels = () => jfetch('/api/models');
 export const getQuota = ({ refresh = false } = {}) =>
   jfetch('/api/quota' + (refresh ? '?refresh=1' : ''));
 export const chatFileUrl = (chatId, filename) => `${BASE}/api/chats/${encodeURIComponent(chatId)}/files/${encodeURIComponent(filename)}`;
+export const chatMediaUrl = (chatId, filename) => `${BASE}/api/chats/${encodeURIComponent(chatId)}/media/${encodeURIComponent(filename)}`;
 export const chatImageUrl = (chatId, filename) => `${BASE}/api/chats/${encodeURIComponent(chatId)}/images/${encodeURIComponent(filename)}`;
 
 export const loginStart = () => post('/api/login');

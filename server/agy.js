@@ -46,20 +46,36 @@ export function topicDir(slug) {
 }
 function _topicDir(d, slug) {
   const agentsMd = path.join(d, 'AGENTS.md');
-  const imageGuide = '\n\n## Menampilkan gambar di chat\nJika membuat gambar untuk pengguna, pastikan file final disimpan di folder ./project/ (atau folder kerja) dalam format PNG, JPG, WebP, GIF, atau AVIF. Cantumkan gambar di jawaban memakai Markdown dengan nama file relatif, misalnya ![Deskripsi gambar](gambar.png). Jangan gunakan URL file:// atau path absolut; salin gambar hasil generate ke ./project/ terlebih dahulu.\n';
-  const fileGuide = '\n\n## Mengirim file hasil di chat\nSimpan setiap file hasil kerja di folder ./project/ (atau folder kerja). Pada jawaban akhir, selalu berikan tautan Markdown dengan nama file relatif untuk setiap file yang perlu diunduh, misalnya [hasil.zip](hasil.zip) atau [script.py](script.py). Jika menghasilkan beberapa file terkait, sertakan tautan ke file satu per satu dan buat ZIP berisi semuanya agar pengguna bisa mengunduh sekaligus lewat tombol unduh di chat. Jangan gunakan tautan bertipe file:// atau path absolut di teks jawaban akhir.\n';
+  const imageGuide = '\n\n## Menampilkan gambar di chat\nJika membuat gambar untuk pengguna, pastikan file final disimpan di folder ./project/ (atau folder kerja) dalam format PNG, JPG, WebP, GIF, AVIF, atau SVG. Cantumkan gambar di jawaban memakai Markdown dengan nama file relatif, misalnya ![Deskripsi gambar](gambar.png). Jika menampilkan beberapa gambar sekaligus agar rapi dalam grid 2 kolom, tulis berurutan dalam 1 paragraf tanpa baris kosong pemisah. Jangan gunakan URL file:// atau path absolut; salin gambar hasil generate ke ./project/ terlebih dahulu.\n';
+  const mediaGuideHeading = '## Menampilkan video, audio, diagram & format kaya di chat';
+  const mediaGuide = `\n\n${mediaGuideHeading}\n- **Tampil / putar langsung (pakai tanda \`!\` di luar tabel):**\n  - Video (.mp4 codec H.264 yuv420p + audio AAC + faststart, .webm, .mov): \`![Judul video](video.mp4)\` → tampil langsung sebagai Video Player + tombol unduh.\n  - Audio (.mp3, .wav, .ogg, .m4a): \`![Judul audio](audio.mp3)\` → tampil langsung sebagai Audio Player + tombol unduh.\n  - PDF (.pdf): \`![Judul dokumen](dokumen.pdf)\` → kartu pratinjau (Buka) + tombol unduh.\n  - Multi-foto grid: tulis beberapa \`![Deskripsi](file.png)\` berurutan dalam 1 paragraf tanpa baris kosong pemisah agar tampil sebagai grid 2 kolom & galeri geser.\n- **Kartu file unduh saja (tanpa \`!\`):** pakai \`[nama.ext](nama.ext)\` untuk daftar unduhan (atau jika hanya ingin memberi tombol unduh tanpa memutar inline). File media yang sudah ditampilkan langsung dengan \`![...]\` sudah punya tombol Unduh sendiri, jadi tidak perlu diulang di daftar unduhan kecuali diminta.\n- **File di dalam tabel:** tautan file di dalam sel tabel otomatis tampil sebagai chip ringkas 1 baris.\n- **Markdown kaya yang didukung:** rumus LaTeX ($...$ / $$...$$), blok diagram \`\`\`mermaid, GitHub Alerts (> [!NOTE], > [!TIP], > [!IMPORTANT], > [!WARNING], > [!CAUTION]), task list (- [x]), <br>, serta <details>/<summary>.\n`;
+  const fileGuide = '\n\n## Mengirim file hasil di chat\nSimpan setiap file hasil kerja di folder ./project/ (atau folder kerja). Pada jawaban akhir, selalu berikan tautan Markdown dengan nama file relatif untuk setiap file yang perlu diunduh, misalnya [hasil.zip](hasil.zip) atau [script.py](script.py). Jika menghasilkan beberapa file terkait, sertakan tautan ke file satu per satu (tanpa mengulang media yang sudah ditampilkan langsung dengan ![...]) dan buat ZIP berisi semuanya agar pengguna bisa mengunduh sekaligus lewat tombol unduh di chat. Jangan gunakan tautan bertipe file:// atau path absolut di teks jawaban akhir.\n';
   const uploadGuide = '\n\n## File upload dari pengguna\nFile yang di-upload pengguna otomatis tersimpan di folder ./project/uploads/. Baca file di sana untuk menjawab; salin hasil kerja yang relevan ke ./project/ bila perlu.\n';
 
   if (!fs.existsSync(agentsMd)) {
-    fs.writeFileSync(agentsMd, `# AGENTS — ${slug}\n\nKamu adalah agent coding di folder proyek "${slug}".\nSemua file yang di-upload user ada di folder ./project/uploads/.\nKerjakan tugas di dalam folder ini. Tulis catatan penting ke AGENTS.md ini.\n\nFormat Tabel & Respon:\n- Jika user meminta perbandingan, jadwal, daftar harga, spesifikasi, atau data terstruktur, selalu sajikan dalam format Markdown Table standar.\n- Berikan respon yang ramah, ringkas, solutif, dan profesional${imageGuide}${fileGuide}${uploadGuide}\nDibuat otomatis: ${new Date().toLocaleString('id-ID')}\n`);
+    fs.writeFileSync(agentsMd, `# AGENTS — ${slug}\n\nKamu adalah agent coding di folder proyek "${slug}".\nSemua file yang di-upload user ada di folder ./project/uploads/.\nKerjakan tugas di dalam folder ini. Tulis catatan penting ke AGENTS.md ini.\n\nFormat Tabel & Respon:\n- Jika user meminta perbandingan, jadwal, daftar harga, spesifikasi, atau data terstruktur, selalu sajikan dalam format Markdown Table standar.\n- Berikan respon yang ramah, ringkas, solutif, dan profesional${imageGuide}${mediaGuide}${fileGuide}${uploadGuide}\nDibuat otomatis: ${new Date().toLocaleString('id-ID')}\n`);
   } else {
-    const current = fs.readFileSync(agentsMd, 'utf8');
+    let current = fs.readFileSync(agentsMd, 'utf8');
+    let updated = false;
+    // Perbarui mediaGuide versi lama (yang memakai [video.mp4] tanpa `!`) ke aturan baru
+    if (current.includes(mediaGuideHeading) && current.includes('misalnya [video.mp4](video.mp4)')) {
+      current = current.replace(
+        new RegExp(`\\n*${mediaGuideHeading}[\\s\\S]*?(?=\\n## |\\nDibuat otomatis:|$)`),
+        mediaGuide.trimEnd(),
+      );
+      updated = true;
+    }
     const missingGuides = [
       current.includes('## Menampilkan gambar di chat') ? '' : imageGuide,
+      current.includes(mediaGuideHeading) ? '' : mediaGuide,
       current.includes('## Mengirim file hasil di chat') ? '' : fileGuide,
       current.includes('## File upload dari pengguna') ? '' : uploadGuide,
     ].join('');
-    if (missingGuides) fs.appendFileSync(agentsMd, missingGuides);
+    if (missingGuides) {
+      current += missingGuides;
+      updated = true;
+    }
+    if (updated) fs.writeFileSync(agentsMd, current);
   }
   return d;
 }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   X, File, FileArchive, FileText, FileCode, FileJson, FileSpreadsheet,
-  FileAudio, FileVideo, FileImage, FileCog,
+  FileAudio, FileVideo, FileImage, FileCog, Play,
 } from 'lucide-react';
 
 const EXT_ICONS = [
@@ -56,17 +56,31 @@ export const keyOf = (f) => {
   return keys.get(f);
 };
 
-export function FileCard({ f, onRemove }) {
+export function FileCard({ f, onRemove, onOpen, playable = false }) {
   const Icon = iconFor(f);
   const ext = fileExt(f.name);
   const size = f.size ?? f.file?.size;
-  return (
-    <div className="att-card" title={f.name}>
-      <span className="att-card-icon"><Icon size={20} /></span>
+  const inner = (
+    <>
+      <span className={'att-card-icon' + (playable ? ' playable' : '')}>
+        {playable ? <Play size={18} fill="currentColor" /> : <Icon size={20} />}
+      </span>
       <span className="att-card-text">
         <span className="att-card-name">{f.name}</span>
         <span className="att-card-meta">{[ext.toUpperCase(), formatSize(size)].filter(Boolean).join(' · ')}</span>
       </span>
+    </>
+  );
+  if (onOpen && !onRemove) {
+    return (
+      <button type="button" className="att-card att-card-btn" title={f.name} onClick={onOpen}>
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <div className="att-card" title={f.name}>
+      {inner}
       {onRemove && (
         <button type="button" className="att-card-remove" onClick={onRemove} aria-label={`Hapus ${f.name}`}>
           <X size={14} />

@@ -173,10 +173,24 @@ const imageTypes = {
   '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif',
   '.svg': 'image/svg+xml',
 };
-const fileTypes = {
+const videoTypes = {
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+  '.m4v': 'video/mp4', '.ogv': 'video/ogg',
+};
+const audioTypes = {
+  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac',
+};
+const inlineMediaTypes = {
   ...imageTypes,
+  ...videoTypes,
+  ...audioTypes,
+  '.pdf': 'application/pdf',
+};
+const fileTypes = {
+  ...inlineMediaTypes,
   '.zip': 'application/zip', '.tar': 'application/x-tar', '.gz': 'application/gzip',
-  '.pdf': 'application/pdf', '.txt': 'text/plain; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8', '.csv': 'text/csv; charset=utf-8', '.json': 'application/json',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -299,7 +313,7 @@ function resolveChatFile(chatId, requestedPath, { imageOnly = false } = {}) {
   return searchRecursive(sessionRoot);
 }
 
-function serveChatProjectFile(req, res, { imageOnly = false, download = false } = {}) {
+function serveChatProjectFile(req, res, { imageOnly = false, mediaOnly = false, download = false } = {}) {
   const rawParam = req.params.filename || req.params[0] || '';
   let filename = String(rawParam);
   try { filename = decodeURIComponent(filename); } catch {}
@@ -308,13 +322,19 @@ function serveChatProjectFile(req, res, { imageOnly = false, download = false } 
   if (!filePath) return res.sendStatus(404);
 
   try {
-    const stat = fs.statSync(filePath);
-    if (stat.size > (imageOnly ? 25 : 100) * 1024 * 1024) return res.sendStatus(413);
-
     const ext = path.extname(filePath).toLowerCase();
+    if (mediaOnly && !inlineMediaTypes[ext]) return res.sendStatus(404);
+
+    const stat = fs.statSync(filePath);
+    const maxMb = mediaOnly ? 250 : (imageOnly ? 25 : 100);
+    if (stat.size > maxMb * 1024 * 1024) return res.sendStatus(413);
+
     res.set('Content-Type', imageOnly ? imageTypes[ext] : (fileTypes[ext] || 'application/octet-stream'));
     res.set('X-Content-Type-Options', 'nosniff');
     res.set('Cache-Control', 'private, max-age=300');
+    if (!download && ext === '.svg') {
+      res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    }
 
     const downloadName = path.basename(filePath);
     const send = download
@@ -331,6 +351,7 @@ function serveChatProjectFile(req, res, { imageOnly = false, download = false } 
 }
 
 app.get('/api/chats/:chatId/images/:filename(*)', (req, res) => serveChatProjectFile(req, res, { imageOnly: true }));
+app.get('/api/chats/:chatId/media/:filename(*)', (req, res) => serveChatProjectFile(req, res, { mediaOnly: true, download: false }));
 app.get('/api/chats/:chatId/files/:filename(*)', (req, res) => serveChatProjectFile(req, res, { download: true }));
 
 function cleanupTempFiles(files = []) {

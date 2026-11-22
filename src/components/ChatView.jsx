@@ -1,6 +1,6 @@
-import { Children, isValidElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Children, createContext, isValidElement, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  Archive, ArrowDown, Check, Copy, Download, File, ImageOff,
+  Archive, ArrowDown, Check, Copy, Download, ExternalLink, File, Film, ImageOff, Maximize2, Music,
   Info, Lightbulb, MessageSquareWarning, AlertTriangle, OctagonAlert,
 } from 'lucide-react';
 import ThinkingProcess from './ThinkingProcess';
@@ -8,9 +8,14 @@ import MermaidDiagram from './MermaidDiagram';
 import ReactMarkdown from 'react-markdown';
 import 'katex/dist/katex.min.css';
 import { preprocessLatex, REMARK_PLUGINS, REHYPE_PLUGINS } from '../utils/markdownPlugins';
-import { chatFileUrl, chatImageUrl } from '../services/ai';
+import { chatFileUrl, chatImageUrl, chatMediaUrl } from '../services/ai';
 import { FileCard, ImageThumb, keyOf } from './AttachmentTray.jsx';
 import ImageLightbox from './ImageLightbox.jsx';
+
+const InTableContext = createContext(false);
+const VIDEO_RE = /\.(?:mp4|webm|mov|m4v|ogv)$/i;
+const AUDIO_RE = /\.(?:mp3|wav|ogg|m4a|aac|flac)$/i;
+const PDF_RE = /\.pdf$/i;
 
 const ALERT_META = {
   note: { label: 'Catatan', Icon: Info },
@@ -57,8 +62,25 @@ function AlertBlockquote({ children, ...props }) {
 
 // Link file:// (path lokal server) nggak bisa dibuka di HP -> tampilkan sebagai teks biasa
 const baseMdComponents = {
-  table: ({ children }) => <div className="md-table-wrap"><table>{children}</table></div>,
+  table: ({ children }) => (
+    <InTableContext.Provider value={true}>
+      <div className="md-table-wrap"><table>{children}</table></div>
+    </InTableContext.Provider>
+  ),
   blockquote: AlertBlockquote,
+  p: ({ children }) => {
+    const arr = Children.toArray(children).filter(c => !(typeof c === 'string' && !c.trim()));
+    const allImages = arr.length >= 2 && arr.every(c => {
+      if (!isValidElement(c)) return false;
+      const isImgNode = c.type === 'img' || c.props?.node?.tagName === 'img';
+      if (!isImgNode) return false;
+      const src = String(c.props?.src || c.props?.node?.properties?.src || '');
+      const local = resolveLocalFilename(src);
+      return !(local && (VIDEO_RE.test(local) || AUDIO_RE.test(local) || PDF_RE.test(local)));
+    });
+    if (allImages) return <div className="md-image-grid">{arr}</div>;
+    return <p>{children}</p>;
+  },
 };
 
 function resolveLocalFilename(href) {
@@ -77,8 +99,32 @@ function resolveImageSrc(src, chatId) {
 
   let filename = src.split(/[?#]/, 1)[0].replace(/\\/g, '/').split('/').pop() || '';
   try { filename = decodeURIComponent(filename); } catch {}
-  if (!/\.(?:png|jpe?g|gif|webp|avif)$/i.test(filename) || filename === '.' || filename === '..') return null;
+  if (!/\.(?:png|jpe?g|gif|webp|avif|svg)$/i.test(filename) || filename === '.' || filename === '..') return null;
   return chatImageUrl(chatId, filename);
+}
+
+// Kumpulkan seluruh gambar di 1 pesan Markdown agar Lightbox mendukung navigasi galeri ◀ / ▶
+function extractMarkdownImages(text, chatId) {
+  const clean = String(text || '').replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`/g, '');
+  const list = [];
+  const seen = new Set();
+  const re = /!\[([^\]]*)\]\((?:<([^>]+)>|([^)\s]+))(?:\s+"[^"]*")?\)/g;
+  let m;
+  while ((m = re.exec(clean)) !== null) {
+    const alt = (m[1] || '').trim();
+    const rawSrc = (m[2] || m[3] || '').trim();
+    const url = resolveImageSrc(rawSrc, chatId);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    const localName = resolveLocalFilename(rawSrc);
+    list.push({
+      name: alt || localName || 'Gambar',
+      url,
+      kind: 'image',
+      downloadUrl: localName && chatId ? chatFileUrl(chatId, localName) : null,
+    });
+  }
+  return list;
 }
 
 function safeMarkdownUrl(url) {
@@ -87,7 +133,7 @@ function safeMarkdownUrl(url) {
   return hasScheme && !allowedScheme ? '' : url;
 }
 
-function ChatImage({ src, alt, chatId }) {
+function ChatImage({ src, alt, chatId, gallery, onOpenMedia }) {
   const imageSrc = resolveImageSrc(src, chatId);
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [imageSrc]);
@@ -100,13 +146,63 @@ function ChatImage({ src, alt, chatId }) {
       </div>
     );
   }
-  return <img className="md-image" src={imageSrc} alt={alt} loading="lazy" decoding="async" onError={() => setFailed(true)} />;
+
+  const open = () => {
+    if (!onOpenMedia) return;
+    const localName = resolveLocalFilename(src);
+    if (Array.isArray(gallery) && gallery.length > 1) {
+      const idx = gallery.findIndex(g => g.url === imageSrc);
+      if (idx >= 0) {
+        onOpenMedia({ items: gallery, index: idx });
+        return;
+      }
+    }
+    onOpenMedia({
+      name: alt || localName || 'Gambar',
+      url: imageSrc,
+      kind: 'image',
+      downloadUrl: localName && chatId ? chatFileUrl(chatId, localName) : null,
+    });
+  };
+
+  return (
+    <button type="button" className="md-image-btn" onClick={open} aria-label={`Lihat penuh ${alt || 'gambar'}`}>
+      <img className="md-image" src={imageSrc} alt={alt} loading="lazy" decoding="async" onError={() => setFailed(true)} />
+    </button>
+  );
 }
 
-function ChatFileCard({ filename, chatId }) {
+function ChatFileCard({ filename, chatId, showPreview = false }) {
   const extension = filename.split('.').pop()?.toUpperCase() || 'FILE';
   const isZip = extension === 'ZIP';
   const url = chatFileUrl(chatId, filename);
+  const previewUrl = showPreview ? chatMediaUrl(chatId, filename) : null;
+
+  if (previewUrl) {
+    return (
+      <span className="md-file-card md-file-card-split">
+        <a
+          className="md-file-card-main"
+          href={previewUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Buka ${filename}`}
+        >
+          <span className="md-file-card-icon"><File size={22} /></span>
+          <span className="md-file-card-info"><strong>{filename}</strong><small>{extension} · Buka pratinjau</small></span>
+        </a>
+        <span className="md-file-card-btns">
+          <a className="md-file-card-action" href={previewUrl} target="_blank" rel="noopener noreferrer" title="Buka" aria-label={`Buka ${filename}`}>
+            <ExternalLink size={18} />
+          </a>
+          <a className="md-file-card-action" href={url} download={filename} target="_blank" rel="noopener noreferrer" title="Unduh" aria-label={`Unduh ${filename}`}>
+            <Download size={19} />
+          </a>
+        </span>
+      </span>
+    );
+  }
+
   return (
     <a
       className="md-file-card"
@@ -121,6 +217,130 @@ function ChatFileCard({ filename, chatId }) {
       <span className="md-file-card-action"><Download size={20} /></span>
     </a>
   );
+}
+
+function ChatVideoCard({ filename, chatId, onOpenMedia }) {
+  const [failed, setFailed] = useState(false);
+  const mediaUrl = chatMediaUrl(chatId, filename);
+  const downloadUrl = chatFileUrl(chatId, filename);
+  useEffect(() => setFailed(false), [mediaUrl]);
+
+  if (failed) return <ChatFileCard filename={filename} chatId={chatId} />;
+
+  return (
+    <span className="md-media-card md-video-card">
+      <video
+        className="md-video"
+        src={mediaUrl}
+        controls
+        playsInline
+        preload="metadata"
+        onError={() => setFailed(true)}
+      />
+      <span className="md-media-bar">
+        <span className="md-media-name" title={filename}>
+          <Film size={15} />
+          <span>{filename}</span>
+        </span>
+        <span className="md-media-actions">
+          {onOpenMedia && (
+            <button
+              type="button"
+              className="md-media-btn"
+              onClick={() => onOpenMedia({ name: filename, url: mediaUrl, kind: 'video', downloadUrl })}
+              aria-label={`Layar penuh ${filename}`}
+              title="Layar penuh"
+            >
+              <Maximize2 size={14} />
+            </button>
+          )}
+          <a
+            className="md-media-btn"
+            href={downloadUrl}
+            download={filename}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={`Unduh ${filename}`}
+            title="Unduh"
+          >
+            <Download size={15} />
+            <span>Unduh</span>
+          </a>
+        </span>
+      </span>
+    </span>
+  );
+}
+
+function ChatAudioCard({ filename, chatId }) {
+  const [failed, setFailed] = useState(false);
+  const mediaUrl = chatMediaUrl(chatId, filename);
+  const downloadUrl = chatFileUrl(chatId, filename);
+  useEffect(() => setFailed(false), [mediaUrl]);
+
+  if (failed) return <ChatFileCard filename={filename} chatId={chatId} />;
+
+  return (
+    <span className="md-media-card md-audio-card">
+      <span className="md-media-bar">
+        <span className="md-media-name" title={filename}>
+          <Music size={15} />
+          <span>{filename}</span>
+        </span>
+        <a
+          className="md-media-btn"
+          href={downloadUrl}
+          download={filename}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Unduh ${filename}`}
+          title="Unduh"
+        >
+          <Download size={15} />
+          <span>Unduh</span>
+        </a>
+      </span>
+      <audio
+        className="md-audio"
+        src={mediaUrl}
+        controls
+        preload="metadata"
+        onError={() => setFailed(true)}
+      />
+    </span>
+  );
+}
+
+// Tautan Markdown tanpa `!` ([file.ext](file.ext)): selalu tampil sebagai kartu file unduh (atau chip di tabel).
+function MarkdownLink({ href = '', children, chatId }) {
+  if (/^https?:\/\//i.test(href)) {
+    return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
+  }
+  const filename = resolveLocalFilename(href);
+  if (!filename || !chatId) return <span className="md-filelink">{children}</span>;
+  return <ChatFileCard filename={filename} chatId={chatId} />;
+}
+
+// Sintaks media dengan `!` (![Deskripsi](file.ext)): inisiatif AI menampilkan/memutar langsung di chat.
+function MarkdownMedia({ src = '', alt = '', chatId, gallery, onOpenMedia }) {
+  const inTable = useContext(InTableContext);
+  const localName = resolveLocalFilename(src);
+  if (localName && chatId) {
+    if (VIDEO_RE.test(localName)) {
+      return inTable
+        ? <ChatFileCard filename={localName} chatId={chatId} />
+        : <ChatVideoCard filename={localName} chatId={chatId} onOpenMedia={onOpenMedia} />;
+    }
+    if (AUDIO_RE.test(localName)) {
+      return inTable
+        ? <ChatFileCard filename={localName} chatId={chatId} />
+        : <ChatAudioCard filename={localName} chatId={chatId} />;
+    }
+    if (PDF_RE.test(localName)) {
+      return <ChatFileCard filename={localName} chatId={chatId} showPreview={!inTable} />;
+    }
+  }
+  return <ChatImage src={src} alt={alt} chatId={chatId} gallery={gallery} onOpenMedia={onOpenMedia} />;
 }
 
 function CodeBlock({ children, lang = '', code = '' }) {
@@ -178,8 +398,9 @@ function CodeBlock({ children, lang = '', code = '' }) {
   );
 }
 
-function Markdown({ text, chatId, streaming = false }) {
+function Markdown({ text, chatId, streaming = false, onOpenMedia }) {
   const processed = useMemo(() => preprocessLatex(text), [text]);
+  const gallery = useMemo(() => extractMarkdownImages(text, chatId), [text, chatId]);
   const components = useMemo(() => ({
     ...baseMdComponents,
     pre: ({ children }) => {
@@ -187,15 +408,13 @@ function Markdown({ text, chatId, streaming = false }) {
       if (lang === 'mermaid') return <MermaidDiagram code={code} streaming={streaming} />;
       return <CodeBlock lang={lang} code={code}>{children}</CodeBlock>;
     },
-    a: ({ href = '', children }) => {
-      if (/^https?:\/\//i.test(href)) return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
-      const filename = resolveLocalFilename(href);
-      return filename && chatId
-        ? <ChatFileCard filename={filename} chatId={chatId} />
-        : <span className="md-filelink">{children}</span>;
-    },
-    img: ({ src = '', alt = '' }) => <ChatImage src={src} alt={alt} chatId={chatId} />,
-  }), [chatId, streaming]);
+    a: ({ href = '', children }) => (
+      <MarkdownLink href={href} chatId={chatId}>{children}</MarkdownLink>
+    ),
+    img: ({ src = '', alt = '' }) => (
+      <MarkdownMedia src={src} alt={alt} chatId={chatId} gallery={gallery} onOpenMedia={onOpenMedia} />
+    ),
+  }), [chatId, streaming, gallery, onOpenMedia]);
   return (
     <ReactMarkdown
       remarkPlugins={REMARK_PLUGINS}
@@ -208,19 +427,69 @@ function Markdown({ text, chatId, streaming = false }) {
   );
 }
 
-// Lampiran pesan terkirim: gambar yang tersimpan di server → thumbnail (tap = lightbox),
-// selain itu (atau gambar lama tanpa info lokasi / file sudah terhapus) → kartu file.
+// Lampiran pesan terkirim: gambar → thumbnail (tap = lightbox), video → kartu play (tap = putar di lightbox),
+// selain itu → kartu file.
 function SentAttachments({ items, chatId, onOpenImage }) {
   const [broken, setBroken] = useState(() => new Set());
+  const gallery = useMemo(() => {
+    const out = [];
+    items.forEach((f, j) => {
+      if (!f.stored || !chatId) return;
+      if (f.type?.startsWith('image/') && !broken.has(j)) {
+        out.push({
+          idx: j,
+          name: f.name,
+          url: chatImageUrl(chatId, f.stored),
+          kind: 'image',
+          downloadUrl: chatFileUrl(chatId, f.stored),
+        });
+      } else if (f.type?.startsWith('video/') || VIDEO_RE.test(f.name || '')) {
+        out.push({
+          idx: j,
+          name: f.name,
+          url: chatMediaUrl(chatId, f.stored),
+          kind: 'video',
+          downloadUrl: chatFileUrl(chatId, f.stored),
+        });
+      }
+    });
+    return out;
+  }, [items, chatId, broken]);
+
+  const openAt = (j, fallbackItem) => {
+    const gIdx = gallery.findIndex(g => g.idx === j);
+    if (gIdx >= 0 && gallery.length > 1) {
+      onOpenImage({ items: gallery, index: gIdx });
+    } else if (gIdx >= 0) {
+      onOpenImage(gallery[gIdx]);
+    } else if (fallbackItem) {
+      onOpenImage(fallbackItem);
+    }
+  };
+
   return (
     <div className="att-tray att-tray-sent">
       {items.map((f, j) => {
-        const src = f.stored && f.type?.startsWith('image/') && !broken.has(j) ? chatImageUrl(chatId, f.stored) : null;
-        return src
-          ? <ImageThumb key={keyOf(f)} f={f} src={src} className="att-thumb-sent"
-              onOpen={() => onOpenImage({ name: f.name, url: src })}
+        const imgSrc = f.stored && f.type?.startsWith('image/') && !broken.has(j) ? chatImageUrl(chatId, f.stored) : null;
+        if (imgSrc) {
+          return (
+            <ImageThumb key={keyOf(f)} f={f} src={imgSrc} className="att-thumb-sent"
+              onOpen={() => openAt(j, { name: f.name, url: imgSrc, kind: 'image', downloadUrl: chatFileUrl(chatId, f.stored) })}
               onBroken={() => setBroken(s => new Set(s).add(j))} />
-          : <FileCard key={keyOf(f)} f={f} />;
+          );
+        }
+        const isVideo = !!f.stored && !!chatId && (f.type?.startsWith('video/') || VIDEO_RE.test(f.name || ''));
+        if (isVideo) {
+          return (
+            <FileCard
+              key={keyOf(f)}
+              f={f}
+              playable
+              onOpen={() => openAt(j, { name: f.name, url: chatMediaUrl(chatId, f.stored), kind: 'video', downloadUrl: chatFileUrl(chatId, f.stored) })}
+            />
+          );
+        }
+        return <FileCard key={keyOf(f)} f={f} />;
       })}
     </div>
   );
@@ -240,7 +509,7 @@ const MessageItem = memo(function MessageItem({ m, chatId, hasPendingQuestion, o
       {(m.content || m.role === 'user') && (
         m.role === 'user'
           ? <div className="bubble">{m.content}</div>
-          : <div className="bubble md"><Markdown text={m.content} chatId={chatId} streaming={!!m.streaming} />{m.streaming && m.content ? <span className="caret" /> : null}</div>
+          : <div className="bubble md"><Markdown text={m.content} chatId={chatId} streaming={!!m.streaming} onOpenMedia={onOpenImage} />{m.streaming && m.content ? <span className="caret" /> : null}</div>
       )}
     </div>
   );
@@ -335,7 +604,11 @@ export default function ChatView({ messages, chatId, hasPendingQuestion, onOpenQ
           </button>
         </div>
       )}
-      <ImageLightbox item={lightbox} onClose={closeLightbox} />
+      <ImageLightbox
+        item={lightbox}
+        onClose={closeLightbox}
+        onNavigate={(nextIdx) => setLightbox(prev => (prev?.items ? { ...prev, index: nextIdx } : prev))}
+      />
     </div>
   );
 }
