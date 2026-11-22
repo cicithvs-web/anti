@@ -14,6 +14,7 @@ const agy = await import('./agy.js');
 const agySandbox = await import('./sandboxManager.js');
 const jobs = await import('./jobs.js');
 const { buildElicitationAnswer } = await import('./acpClient.js');
+const { summarizeSession, parseTranscriptMessages } = await import('./transcriptParser.js');
 
 const app = express();
 app.set('trust proxy', true); // supaya req.secure / req.ip benar di belakang nginx / tunnel
@@ -434,6 +435,7 @@ app.post('/api/chat', upload.array('files', MAX_UPLOAD_FILES), async (req, res, 
     const st = agy.readState(slug);
     if (model) st.model = model;
     if (!st.model) st.model = agy.DEFAULT_MODEL;
+    if (!st.title) st.title = (String(text || '').replace(/\s+/g, ' ').trim() || files[0]?.name || slug).slice(0, 80);
     agy.writeState(slug, st);
 
     const started = Date.now();
@@ -647,9 +649,18 @@ app.post('/api/chat/stream', upload.array('files', MAX_UPLOAD_FILES), async (req
     const st = agy.readState(slug);
     if (model) st.model = model;
     if (!st.model) st.model = agy.DEFAULT_MODEL;
+    if (!st.title) st.title = (String(text || '').replace(/\s+/g, ' ').trim() || files[0]?.name || slug).slice(0, 80);
     agy.writeState(slug, st);
 
-    const job = jobs.createJob(slug);
+    const userAttachments = files.map((f) => ({
+      name: f.name, type: f.type, size: f.size, stored: `uploads/${path.basename(f.path)}`,
+    }));
+    const job = jobs.createJob(slug, {
+      userText: String(text || ''),
+      userAttachments,
+      model: st.model,
+      title: st.title,
+    });
     // Beri tahu klien lokasi upload (relatif ke folder project) supaya lampiran gambar
     // di pesan terkirim bisa ditampilkan lagi lewat /api/chats/:chatId/images/...
     if (files.length) {
@@ -768,6 +779,184 @@ app.post('/api/sandbox/reset', requireAdmin, async (req, res) => {
   const removed = await agySandbox.resetSandbox(slug);
   // Container dibuat ulang otomatis (beserta install agy) saat chat berikutnya berjalan.
   res.json({ ok: removed, slug, note: 'Container direset; akan dibuat ulang otomatis saat chat berikutnya.' });
+});
+
+// ---------- ADMIN CHATS (riwayat semua sesi di VPS — khusus pemegang ADMIN_TOKEN) ----------
+const BRAIN_DIR = path.join(agySandbox.GEMINI_DATA_DIR, 'antigravity-cli', 'brain');
+
+function jobStatusOf(aj, queuedSet) {
+  if (!aj) return null;
+  if (aj.hasQuestion) return 'question';
+  if (aj.queued || queuedSet?.has(aj.slug)) return 'queued';
+  return 'running';
+}
+
+app.get('/api/admin/chats', requireAdmin, async (req, res) => {
+  const slugs = new Set();
+  try {
+    for (const entry of fs.readdirSync(agy.BASE, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name !== 'default' && !entry.name.startsWith('.')) {
+        slugs.add(entry.name);
+      }
+    }
+  } catch {}
+
+  const activeList = jobs.listActiveJobs();
+  const activeMap = new Map(activeList.map((j) => [j.slug, j]));
+  const queuedSet = new Set(agy.queuedSlugs());
+  for (const j of activeList) {
+    if (j.slug && j.slug !== 'default') slugs.add(j.slug);
+  }
+
+  const sandboxes = await agySandbox.listSandboxes();
+  const chats = [];
+  for (const slug of slugs) {
+    const sessionRoot = path.join(agy.BASE, slug);
+    const sum = summarizeSession(slug, sessionRoot, BRAIN_DIR);
+    const aj = activeMap.get(slug) || null;
+    const sb = sandboxes.get(agySandbox.slugSafe(slug)) || null;
+    if (aj) {
+      if (sum.title === slug && aj.title) sum.title = aj.title;
+      if (!sum.model && aj.model) sum.model = aj.model;
+      sum.updatedAt = Math.max(sum.updatedAt, aj.updatedAt || aj.createdAt || 0);
+    }
+    chats.push({
+      ...sum,
+      jobStatus: jobStatusOf(aj, queuedSet),
+      jobDetail: aj?.statusText || null,
+      jobStartedAt: aj?.createdAt || null,
+      containerState: sb?.state || null,
+      containerStatus: sb?.status || null,
+    });
+  }
+
+  chats.sort((a, b) => {
+    const aLive = a.jobStatus ? 1 : 0;
+    const bLive = b.jobStatus ? 1 : 0;
+    if (aLive !== bLive) return bLive - aLive;
+    return (b.updatedAt || 0) - (a.updatedAt || 0);
+  });
+
+  res.json({
+    ok: true,
+    running: agy.runningCount(),
+    queued: agy.queuedCount(),
+    maxParallel: agy.MAX_PARALLEL,
+    chats,
+  });
+});
+
+app.get('/api/admin/chats/:chatId', requireAdmin, async (req, res) => {
+  const slug = agy.slugify(req.params.chatId);
+  if (!slug || slug === 'default') return res.status(400).json({ ok: false, error: 'chatId tidak valid' });
+
+  const sessionRoot = path.resolve(agy.BASE, slug);
+  if (!sessionRoot.startsWith(path.resolve(agy.BASE) + path.sep)) {
+    return res.status(400).json({ ok: false, error: 'chatId tidak valid' });
+  }
+  const job = jobs.getJob(slug);
+  const runningJob = job && !job.done && !job.deleted ? job : null;
+  if (!fs.existsSync(sessionRoot) && !runningJob) {
+    return res.status(404).json({ ok: false, error: 'Sesi tidak ditemukan.' });
+  }
+
+  const sum = summarizeSession(slug, sessionRoot, BRAIN_DIR);
+  const convId = sum.conversationId || runningJob?.conversationId || null;
+  const parsed = parseTranscriptMessages(BRAIN_DIR, convId, sessionRoot, { toolLabel, toolKind });
+  let messages = parsed.messages;
+
+  if (runningJob) {
+    // Sisipkan/ganti giliran yang masih berjalan dengan placeholder streaming agar klien bisa replay live dari seq 0
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') { lastUserIdx = i; break; }
+    }
+    const lastUser = lastUserIdx >= 0 ? messages[lastUserIdx] : null;
+    const sameTurn = !!lastUser && (
+      (lastUser.createdAt && lastUser.createdAt >= runningJob.createdAt - 15_000)
+      || (lastUserIdx >= messages.length - 2 && String(lastUser.content || '').trim() === String(runningJob.userText || '').trim())
+    );
+    if (sameTurn) {
+      messages = messages.slice(0, lastUserIdx + 1);
+    } else {
+      messages = [
+        ...messages,
+        {
+          id: `live-user-${runningJob.createdAt}`,
+          role: 'user',
+          content: runningJob.userText || '',
+          ...(runningJob.userAttachments?.length ? { attachments: runningJob.userAttachments } : {}),
+          createdAt: runningJob.createdAt,
+        },
+      ];
+    }
+    messages.push({
+      id: `live-ai-${runningJob.createdAt}`,
+      role: 'assistant',
+      content: '',
+      steps: [],
+      streaming: true,
+      status: runningJob.statusText || 'Menyambung…',
+      startedAt: runningJob.createdAt,
+    });
+  }
+
+  const sandboxes = await agySandbox.listSandboxes();
+  const sb = sandboxes.get(agySandbox.slugSafe(slug)) || null;
+  const queuedSet = new Set(agy.queuedSlugs());
+  const aj = runningJob ? {
+    slug,
+    queued: !!runningJob.queued,
+    hasQuestion: !!runningJob.question,
+    statusText: runningJob.statusText,
+    createdAt: runningJob.createdAt,
+  } : null;
+
+  res.json({
+    ok: true,
+    chat: {
+      ...sum,
+      messages,
+      jobStatus: jobStatusOf(aj, queuedSet),
+      jobDetail: aj?.statusText || null,
+      jobStartedAt: aj?.createdAt || null,
+      containerState: sb?.state || null,
+      containerStatus: sb?.status || null,
+      activeJob: runningJob ? {
+        running: true,
+        queued: !!runningJob.queued || queuedSet.has(slug),
+        hasQuestion: !!runningJob.question,
+        statusText: runningJob.statusText || 'Berjalan…',
+        startedAt: runningJob.createdAt,
+      } : null,
+    },
+  });
+});
+
+app.patch('/api/admin/chats/:chatId', requireAdmin, (req, res) => {
+  const slug = agy.slugify(req.params.chatId);
+  if (!slug || slug === 'default') return res.status(400).json({ ok: false, error: 'chatId tidak valid' });
+  const sessionRoot = path.resolve(agy.BASE, slug);
+  if (!sessionRoot.startsWith(path.resolve(agy.BASE) + path.sep) || !fs.existsSync(sessionRoot)) {
+    return res.status(404).json({ ok: false, error: 'Sesi tidak ditemukan.' });
+  }
+  const st = agy.readState(slug);
+  const { title, pinned, model } = req.body || {};
+  if (typeof title === 'string' && title.trim()) st.title = title.trim().slice(0, 120);
+  if (typeof pinned === 'boolean') st.pinned = pinned;
+  if (typeof model === 'string' && model.trim()) st.model = model.trim();
+  agy.writeState(slug, st);
+  res.json({ ok: true, chat: { id: slug, title: st.title, pinned: !!st.pinned, model: st.model || null } });
+});
+
+app.post('/api/admin/chats/:chatId/sleep', requireAdmin, async (req, res) => {
+  const slug = agy.slugify(req.params.chatId);
+  if (!slug || slug === 'default') return res.status(400).json({ ok: false, error: 'chatId tidak valid' });
+  if (jobs.isJobRunning(slug)) {
+    return res.status(409).json({ ok: false, error: 'Chat masih berjalan. Hentikan dulu sebelum menidurkan sandbox.' });
+  }
+  const stopped = await agySandbox.stopSandbox(slug);
+  res.json({ ok: true, slug, stopped });
 });
 
 // ---------- FRONTEND ----------

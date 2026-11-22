@@ -6,10 +6,11 @@
 const KEEP_FINISHED_MS = 10 * 60 * 1000; // job selesai disimpan 10 menit untuk reconnect
 const jobs = new Map(); // slug -> job
 
-export function createJob(slug) {
+export function createJob(slug, meta = {}) {
   const prev = jobs.get(slug);
   if (prev?.cleanupTimer) clearTimeout(prev.cleanupTimer);
 
+  const now = Date.now();
   const job = {
     slug,
     events: [],
@@ -17,7 +18,14 @@ export function createJob(slug) {
     done: false,
     deleted: false,
     controller: new AbortController(),
-    createdAt: Date.now(),
+    createdAt: now,
+    lastEventAt: now,
+    queued: false,
+    statusText: 'Menyiapkan…',
+    title: meta.title || null,
+    model: meta.model || null,
+    userText: meta.userText ?? '',
+    userAttachments: Array.isArray(meta.userAttachments) ? meta.userAttachments : [],
     cleanupTimer: null,
   };
 
@@ -25,9 +33,20 @@ export function createJob(slug) {
     if (job.done || job.deleted) return;
     const e = { ...ev, seq: job.events.length };
     job.events.push(e);
+    job.lastEventAt = Date.now();
+    if (e.type === 'queued') { job.queued = true; job.statusText = 'Menunggu antrean…'; }
+    else if (e.type === 'start') { job.queued = false; job.statusText = 'Berpikir…'; }
+    else if (e.type === 'status' && e.text) { job.statusText = e.text; }
+    else if (e.type === 'thought') { job.statusText = 'Berpikir…'; }
+    else if (e.type === 'step' && e.step) {
+      job.statusText = e.step.status === 'running' ? (e.step.label || 'Menjalankan tool…') : 'Berpikir…';
+    } else if (e.type === 'question') { job.statusText = 'Menunggu jawaban…'; }
+    else if (e.type === 'question_done') { job.statusText = 'Berpikir…'; }
+    else if (e.type === 'delta') { job.statusText = 'Menulis jawaban…'; }
     for (const fn of [...job.listeners]) { try { fn(e); } catch {} }
     if (e.type === 'done') {
       job.done = true;
+      job.queued = false;
       job.listeners.clear();
       job.cleanupTimer = setTimeout(() => { if (jobs.get(slug) === job) jobs.delete(slug); }, KEEP_FINISHED_MS);
       job.cleanupTimer.unref?.();
@@ -49,6 +68,26 @@ export function createJob(slug) {
 
 export const getJob = (slug) => jobs.get(slug) || null;
 export const isJobRunning = (slug) => { const j = jobs.get(slug); return !!j && !j.done; };
+
+export function listActiveJobs() {
+  const list = [];
+  for (const j of jobs.values()) {
+    if (j.done || j.deleted) continue;
+    list.push({
+      slug: j.slug,
+      createdAt: j.createdAt,
+      updatedAt: j.lastEventAt,
+      queued: !!j.queued,
+      hasQuestion: !!j.question,
+      statusText: j.statusText || 'Menyiapkan…',
+      title: j.title,
+      model: j.model,
+      userText: j.userText,
+      userAttachments: j.userAttachments,
+    });
+  }
+  return list;
+}
 
 export function stopJob(slug) {
   const j = jobs.get(slug);

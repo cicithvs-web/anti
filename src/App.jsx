@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { MessageCircleQuestion } from 'lucide-react';
+import { MessageCircleQuestion, Loader } from 'lucide-react';
 import './App.css';
 import Header from './components/Header';
 import Welcome from './components/Welcome';
@@ -15,10 +15,11 @@ import AuthGate from './components/AuthGate';
 import ImageEditor from './components/ImageEditor';
 import ImageLightbox from './components/ImageLightbox';
 import { isEditableImage } from './services/imageEdit';
-import { useChats } from './hooks/useChats';
+import { useChats, newId } from './hooks/useChats';
 import {
   apiStatus, authCheck, AUTH_EVENT, startChatStream, resumeChatStream, formatDone,
   stopChat as apiStopChat, answerQuestion as apiAnswerQuestion, deleteChatOnServer, cachedModels, loadModels,
+  getAdminChats, getAdminChat, updateAdminChat, sleepAdminChat,
 } from './services/ai';
 import { MODELS, DEFAULT_MODEL, DEFAULT_UPLOAD_LIMITS } from './data/models';
 
@@ -52,20 +53,32 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [account, setAccount] = useState(null);
+  // Daftar chat dari VPS khusus mode admin (disimpan di memori saja, TIDAK pernah ditulis ke localStorage)
+  const [adminChats, setAdminChats] = useState([]);
+  const [adminRefreshing, setAdminRefreshing] = useState(false);
+  const [loadingChatId, setLoadingChatId] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'system');
   const [font, setFont] = useState(() => localStorage.getItem('font') || 'Default');
-  const abortRef = useRef(new Map()); // chatId -> AbortController (koneksi stream di browser)
+  const abortRef = useRef(new Map()); // chatId -> { controller, isServer }
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+  const localChatsRef = useRef(chats);
+  localChatsRef.current = chats;
+  const adminChatsRef = useRef(adminChats);
+  adminChatsRef.current = adminChats;
+  const isAdminView = !!account?.isAdmin && !!account?.adminEnabled;
+  const isAdminViewRef = useRef(isAdminView);
+  isAdminViewRef.current = isAdminView;
+  const visibleChats = isAdminView ? adminChats : chats;
   const activeQuestion = activeId ? (pendingQuestions[activeId] || null) : null;
   const questionOpen = !!activeQuestion && dismissedQuestionId !== activeQuestion.id;
   const questionOpenRef = useRef({ open: false, id: null });
   questionOpenRef.current = { open: questionOpen, id: activeQuestion?.id || null };
-  const setChatLoading = (id, on) => setLoadingIds(prev => {
+  const setChatLoading = useCallback((id, on) => setLoadingIds(prev => {
     const next = new Set(prev);
     if (on) next.add(id); else next.delete(id);
     return next;
-  });
+  }), []);
   const clearChatQuestion = useCallback((id, qid = null) => {
     setPendingQuestions(prev => {
       if (!prev[id]) return prev;
@@ -75,6 +88,52 @@ export default function App() {
       return next;
     });
   }, []);
+
+  const updateAdminChatState = useCallback((id, fn) => {
+    setAdminChats(cs => cs.map(c => (c.id === id ? fn(c) : c)));
+  }, []);
+
+  const storeAddMessage = useCallback((id, msg, isServer) => {
+    if (isServer) {
+      updateAdminChatState(id, c => ({
+        ...c,
+        messages: [...(c.messages || []), { id: newId(), ...msg }],
+        updatedAt: Date.now(),
+        loaded: true,
+      }));
+    } else {
+      addMessage(id, msg);
+    }
+  }, [addMessage, updateAdminChatState]);
+
+  const storeUpdateLastMessage = useCallback((id, fn, isServer) => {
+    if (isServer) {
+      updateAdminChatState(id, c => {
+        const list = c.messages || [];
+        if (!list.length) return c;
+        const ms = list.slice();
+        ms[ms.length - 1] = fn(ms[ms.length - 1]);
+        return { ...c, messages: ms, updatedAt: Date.now() };
+      });
+    } else {
+      updateLastMessage(id, fn);
+    }
+  }, [updateLastMessage, updateAdminChatState]);
+
+  const storeUpdateLastUserMessage = useCallback((id, fn, isServer) => {
+    if (isServer) {
+      updateAdminChatState(id, c => {
+        const list = c.messages || [];
+        const k = list.map(m => m.role).lastIndexOf('user');
+        if (k < 0) return c;
+        const ms = list.slice();
+        ms[k] = fn(ms[k]);
+        return { ...c, messages: ms };
+      });
+    } else {
+      updateLastUserMessage(id, fn);
+    }
+  }, [updateLastUserMessage, updateAdminChatState]);
 
   // ---- auth ----
   useEffect(() => {
@@ -101,7 +160,92 @@ export default function App() {
   // status backend/akun agy
   useEffect(() => {
     if (authed) apiStatus().then(setAccount).catch(() => {});
+    else setAccount(null);
   }, [accountOpen, authed]);
+
+  const refreshAdminChats = useCallback(async ({ silent = false } = {}) => {
+    if (!isAdminViewRef.current) return;
+    if (!silent) setAdminRefreshing(true);
+    try {
+      const r = await getAdminChats();
+      if (!isAdminViewRef.current) return;
+      if (r?.ok && Array.isArray(r.chats)) {
+        setAccount(prev => (prev ? { ...prev, running: r.running, queued: r.queued, maxParallel: r.maxParallel } : prev));
+        setAdminChats(prev => {
+          const prevMap = new Map(prev.map(c => [c.id, c]));
+          const seen = new Set();
+          const merged = r.chats.map(item => {
+            seen.add(item.id);
+            const old = prevMap.get(item.id);
+            const streamingLocally = abortRef.current.has(item.id);
+            const keepMessages = !!old && (streamingLocally || old.loaded);
+            return {
+              ...item,
+              // Pertahankan status live lokal jika tab ini sendiri sedang mem-follow stream-nya
+              jobStatus: item.jobStatus || (streamingLocally ? (old?.jobStatus || 'running') : null),
+              jobDetail: item.jobDetail || (streamingLocally ? old?.jobDetail : null),
+              messages: keepMessages ? (old.messages || []) : (old?.messages || []),
+              loaded: keepMessages ? !!old.loaded : false,
+            };
+          });
+          // Pertahankan chat baru yang baru saja dimulai admin di tab ini sebelum folder sesi selesai dibuat
+          for (const old of prev) {
+            if (!seen.has(old.id) && abortRef.current.has(old.id)) merged.unshift(old);
+          }
+          return merged;
+        });
+      }
+    } catch (e) {
+      if (e?.status === 403) setAdminChats([]);
+    } finally {
+      if (!silent) setAdminRefreshing(false);
+    }
+  }, []);
+
+  // Bersihkan seluruh data chat server dari memori segera saat keluar/kunci kembali mode admin
+  useEffect(() => {
+    if (authed && isAdminView) {
+      refreshAdminChats();
+      return;
+    }
+    for (const [id, entry] of [...abortRef.current.entries()]) {
+      if (entry?.isServer) {
+        entry.controller.abort('detach');
+        abortRef.current.delete(id);
+      }
+    }
+    setAdminChats([]);
+    setLoadingChatId(null);
+    const localIds = new Set(localChatsRef.current.map(c => c.id));
+    setActiveId(prev => (prev && localIds.has(prev) ? prev : null));
+    setLoadingIds(prev => {
+      let changed = false;
+      const next = new Set();
+      for (const id of prev) {
+        if (localIds.has(id)) next.add(id); else changed = true;
+      }
+      return changed ? next : prev;
+    });
+    setPendingQuestions(prev => {
+      let changed = false;
+      const next = {};
+      for (const [id, q] of Object.entries(prev)) {
+        if (localIds.has(id)) next[id] = q; else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [authed, isAdminView, refreshAdminChats]);
+
+  // Segarkan daftar obrolan server secara berkala di mode admin (lebih cepat saat Drawer terbuka)
+  useEffect(() => {
+    if (!authed || !isAdminView) return;
+    if (drawerOpen) refreshAdminChats({ silent: true });
+    const ms = drawerOpen ? 8_000 : 25_000;
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') refreshAdminChats({ silent: true });
+    }, ms);
+    return () => clearInterval(t);
+  }, [authed, isAdminView, drawerOpen, refreshAdminChats]);
 
   // daftar model: dari cache sessionStorage, diambil ulang kalau kadaluarsa / akun berganti
   const refreshModels = useCallback((force = false) => {
@@ -111,7 +255,7 @@ export default function App() {
   }, [account?.email]);
   useEffect(() => { if (authed) refreshModels(); }, [authed, refreshModels]);
 
-  const active = chats.find(c => c.id === activeId);
+  const active = visibleChats.find(c => c.id === activeId);
   const chatModel = active?.model || model; // model per chat
   const modelName = models.find(m => m.id === chatModel)?.name
     || MODELS.find(m => m.id === chatModel)?.name || chatModel;
@@ -119,14 +263,23 @@ export default function App() {
 
   const changeModel = (id) => {
     setModel(id);
-    if (active) setChatModel(active.id, id);
+    if (!active) return;
+    if (isAdminView) {
+      updateAdminChatState(active.id, c => ({ ...c, model: id }));
+      updateAdminChat(active.id, { model: id }).catch(() => {});
+    } else {
+      setChatModel(active.id, id);
+    }
   };
 
   // ---- stop: hentikan job di server + putus stream di browser ----
   const stopChat = (id) => {
     if (!id) return;
     apiStopChat(id).catch(() => {});
-    abortRef.current.get(id)?.abort();
+    abortRef.current.get(id)?.controller.abort();
+    if (isAdminViewRef.current) {
+      setTimeout(() => refreshAdminChats({ silent: true }), 600);
+    }
   };
 
   useEffect(() => {
@@ -151,12 +304,13 @@ export default function App() {
 
   // Ikuti job chat di server sampai `done`. Koneksi putus → sambung ulang otomatis (replay dari seq terakhir).
   // open(signal, onEvent) = request pertama (POST mulai job, atau GET resume).
-  async function followJob(id, open, { resetOnFirstEvent = false } = {}) {
+  async function followJob(id, open, { resetOnFirstEvent = false, isServer = false } = {}) {
     setChatLoading(id, true);
     const controller = new AbortController();
     const { signal } = controller;
-    abortRef.current.set(id, controller);
-    const upd = (fn) => updateLastMessage(id, m => (m.role === 'assistant' ? { ...m, ...fn(m) } : m));
+    abortRef.current.set(id, { controller, isServer });
+    const upd = (fn) => storeUpdateLastMessage(id, m => (m.role === 'assistant' ? { ...m, ...fn(m) } : m), isServer);
+    const updMeta = (patch) => { if (isServer) updateAdminChatState(id, c => ({ ...c, ...patch })); };
     const t0 = Date.now();
     let lastSeq = -1;
     let needReset = resetOnFirstEvent;
@@ -169,41 +323,52 @@ export default function App() {
       if (needReset) { needReset = false; clearChatQuestion(id); upd(() => ({ content: '', steps: [] })); }
       if (ev.type === 'uploads') {
         // tempel lokasi file di server ke lampiran pesan user (urutan sama dengan saat dikirim)
-        updateLastUserMessage(id, m => {
+        storeUpdateLastUserMessage(id, m => {
           if (!m.attachments?.length || !Array.isArray(ev.files)) return m;
           // dicocokkan per urutan (nama dari server bisa beda encoding untuk nama non-ASCII)
           if (ev.files.length !== m.attachments.length) return m;
           return { ...m, attachments: m.attachments.map((a, k) => ({ ...a, stored: ev.files[k].stored })) };
-        });
+        }, isServer);
         return;
       }
-      if (ev.type === 'queued') upd(() => ({ status: 'Menunggu antrean…' }));
-      else if (ev.type === 'start') upd(() => ({ status: 'Berpikir…' }));
-      else if (ev.type === 'status' && ev.text) upd(() => ({ status: ev.text }));
-      else if (ev.type === 'thought') upd(m => {
+      if (ev.type === 'queued') {
+        upd(() => ({ status: 'Menunggu antrean…' }));
+        updMeta({ jobStatus: 'queued', jobDetail: 'Menunggu antrean…' });
+      } else if (ev.type === 'start') {
+        upd(() => ({ status: 'Berpikir…' }));
+        updMeta({ jobStatus: 'running', jobDetail: 'Berpikir…' });
+      } else if (ev.type === 'status' && ev.text) {
+        upd(() => ({ status: ev.text }));
+        updMeta({ jobStatus: 'running', jobDetail: ev.text });
+      } else if (ev.type === 'thought') upd(m => {
         const steps = (m.steps || []).slice();
         const k = steps.findIndex(s => s.id === ev.id);
         if (k >= 0) steps[k] = { ...steps[k], text: (steps[k].text || '') + ev.text };
         else steps.push({ id: ev.id, kind: 'think', label: 'Berpikir', text: ev.text, status: 'running' });
         return { steps, status: 'Berpikir…' };
       });
-      else if (ev.type === 'step') upd(m => {
-        const steps = (m.steps || []).map(s => (s.kind === 'think' && s.status === 'running' ? { ...s, status: 'done' } : s));
-        const k = steps.findIndex(s => s.id === ev.step.id);
-        if (k >= 0) steps[k] = { ...steps[k], ...ev.step }; else steps.push(ev.step);
+      else if (ev.type === 'step') {
         const st = ev.step.status === 'running' ? ev.step.label : 'Berpikir…';
-        return { steps, status: st };
-      });
-      else if (ev.type === 'question' && ev.question) {
+        upd(m => {
+          const steps = (m.steps || []).map(s => (s.kind === 'think' && s.status === 'running' ? { ...s, status: 'done' } : s));
+          const k = steps.findIndex(s => s.id === ev.step.id);
+          if (k >= 0) steps[k] = { ...steps[k], ...ev.step }; else steps.push(ev.step);
+          return { steps, status: st };
+        });
+        updMeta({ jobStatus: 'running', jobDetail: st });
+      } else if (ev.type === 'question' && ev.question) {
         setPendingQuestions(prev => ({ ...prev, [id]: ev.question }));
         setDismissedQuestionId(prev => (prev === ev.question.id ? null : prev));
         upd(() => ({ status: 'Menunggu jawabanmu…' }));
-      }
-      else if (ev.type === 'question_done') {
+        updMeta({ jobStatus: 'question', jobDetail: 'Menunggu jawaban…' });
+      } else if (ev.type === 'question_done') {
         clearChatQuestion(id, ev.id);
         upd(() => ({ status: 'Berpikir…' }));
+        updMeta({ jobStatus: 'running', jobDetail: 'Berpikir…' });
+      } else if (ev.type === 'delta') {
+        upd(m => ({ content: (m.content || '') + ev.text, status: 'Menulis jawaban…' }));
+        updMeta({ jobStatus: 'running', jobDetail: 'Menulis jawaban…' });
       }
-      else if (ev.type === 'delta') upd(m => ({ content: (m.content || '') + ev.text, status: 'Menulis jawaban…' }));
     };
 
     const markCancelled = () => upd(m => ({
@@ -240,29 +405,79 @@ export default function App() {
       const reply = formatDone(res.done);
       upd(m => ({ content: reply.text, streaming: false, durationSec: reply.durationSec ?? Math.round((Date.now() - (m.startedAt || t0)) / 1000) }));
     } catch (err) {
+      if (signal.aborted && signal.reason === 'detach') return;
       if (err.name === 'AbortError') markCancelled();
       else upd(m => ({ content: (m.content ? m.content + '\n\n' : '') + 'Error: ' + err.message, streaming: false, durationSec: Math.round((Date.now() - (m.startedAt || t0)) / 1000) }));
     } finally {
-      if (abortRef.current.get(id) === controller) abortRef.current.delete(id);
-      clearChatQuestion(id);
-      setChatLoading(id, false);
+      if (abortRef.current.get(id)?.controller === controller) abortRef.current.delete(id);
+      if (!(signal.aborted && signal.reason === 'detach')) {
+        clearChatQuestion(id);
+        setChatLoading(id, false);
+        if (isServer && isAdminViewRef.current) {
+          updateAdminChatState(id, c => ({ ...c, jobStatus: null, jobDetail: null }));
+          refreshAdminChats({ silent: true });
+        }
+      }
     }
   }
 
-  // Setelah refresh: sambung ulang ke job yang masih berjalan di server
+  // Setelah refresh (mode user biasa): sambung ulang ke job yang masih berjalan di server
   const resumedRef = useRef(false);
   useEffect(() => {
-    if (authed !== true || resumedRef.current) return;
+    if (authed !== true || !account || isAdminView || resumedRef.current) return;
     resumedRef.current = true;
     for (const c of chats) {
       const last = c.messages[c.messages.length - 1];
       if (last?.role === 'assistant' && last.streaming) {
         updateLastMessage(c.id, m => ({ ...m, status: 'Menyambung ulang…' }));
-        followJob(c.id, (signal, onEvent) => resumeChatStream({ chatId: c.id, since: 0, signal }, onEvent), { resetOnFirstEvent: true });
+        followJob(c.id, (signal, onEvent) => resumeChatStream({ chatId: c.id, since: 0, signal }, onEvent), { resetOnFirstEvent: true, isServer: false });
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed]);
+  }, [authed, account, isAdminView]);
+
+  const loadAdminChat = useCallback(async (id) => {
+    if (!id || !isAdminViewRef.current || abortRef.current.has(id)) return;
+    const existing = adminChatsRef.current.find(c => c.id === id);
+    if (!existing?.loaded) setLoadingChatId(id);
+    try {
+      const r = await getAdminChat(id);
+      if (!isAdminViewRef.current || !r?.ok || !r.chat) return;
+      if (abortRef.current.has(id)) return;
+      setAdminChats(prev => {
+        const exists = prev.some(c => c.id === id);
+        const item = { ...r.chat, loaded: true };
+        return exists ? prev.map(c => (c.id === id ? { ...c, ...item } : c)) : [item, ...prev];
+      });
+      if (r.chat.activeJob?.running && !abortRef.current.has(id)) {
+        followJob(
+          id,
+          (signal, onEvent) => resumeChatStream({ chatId: id, since: 0, signal }, onEvent),
+          { resetOnFirstEvent: true, isServer: true },
+        );
+      }
+    } catch {}
+    finally {
+      setLoadingChatId(cur => (cur === id ? null : cur));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Jika user baru membuka kunci admin saat sedang melihat 1 chat, otomatis muat riwayatnya dari VPS
+  useEffect(() => {
+    if (!isAdminView || !activeId) return;
+    const cur = adminChats.find(c => c.id === activeId);
+    if (cur && !cur.loaded && loadingChatId !== activeId && !abortRef.current.has(activeId)) {
+      loadAdminChat(activeId);
+    }
+  }, [isAdminView, activeId, adminChats, loadingChatId, loadAdminChat]);
+
+  // Pilih obrolan di Drawer (di mode admin: muat riwayat dari VPS & sambung live jika sedang berjalan)
+  const selectChat = (id) => {
+    setActiveId(id);
+    setDrawerOpen(false);
+    if (isAdminViewRef.current) loadAdminChat(id);
+  };
 
   async function handleSend(input) {
     // ChatInput mengirim { text, files }; tetap dukung string biasa
@@ -273,18 +488,61 @@ export default function App() {
     setAttachError('');
     const userMsg = { role: 'user', content: text, attachments: files.map(f => ({ name: f.name, type: f.type, size: f.size ?? f.file?.size })) };
     const useModel = active?.model || model;
+    const isServer = isAdminView;
 
     let id = activeId;
-    if (!id) { id = createChat(text, useModel); setActiveId(id); }
-    addMessage(id, userMsg);
+    if (!id) {
+      if (isServer) {
+        id = newId();
+        const title = (text.replace(/\s+/g, ' ').trim() || files[0]?.name || 'Chat baru').slice(0, 60);
+        setAdminChats(cs => [{
+          id, title, pinned: false, model: useModel, messages: [], updatedAt: Date.now(),
+          serverChat: true, loaded: true, jobStatus: 'running', jobDetail: 'Menyiapkan…', jobStartedAt: Date.now(),
+        }, ...cs]);
+      } else {
+        id = createChat(text || files[0]?.name || 'Chat baru', useModel);
+      }
+      setActiveId(id);
+    } else if (isServer) {
+      updateAdminChatState(id, c => ({ ...c, jobStatus: 'running', jobDetail: 'Menyiapkan…', jobStartedAt: Date.now() }));
+    }
+    storeAddMessage(id, userMsg, isServer);
     // placeholder jawaban AI: diisi bertahap oleh stream (langkah proses + teks)
-    addMessage(id, { role: 'assistant', content: '', steps: [], streaming: true, status: 'Menyiapkan…', startedAt: Date.now() });
-    await followJob(id, (signal, onEvent) => startChatStream({ chatId: id, model: useModel, text, files, signal }, onEvent));
+    storeAddMessage(id, { role: 'assistant', content: '', steps: [], streaming: true, status: 'Menyiapkan…', startedAt: Date.now() }, isServer);
+    await followJob(id, (signal, onEvent) => startChatStream({ chatId: id, model: useModel, text, files, signal }, onEvent), { isServer });
   }
 
+  const handleTogglePin = (id) => {
+    if (isAdminView) {
+      const cur = adminChatsRef.current.find(c => c.id === id);
+      const next = !cur?.pinned;
+      updateAdminChatState(id, c => ({ ...c, pinned: next }));
+      updateAdminChat(id, { pinned: next }).catch(() => {});
+    } else {
+      togglePin(id);
+    }
+  };
+
+  const handleRename = (id, title) => {
+    if (isAdminView) {
+      updateAdminChatState(id, c => ({ ...c, title }));
+      updateAdminChat(id, { title }).catch(() => {});
+    } else {
+      renameChat(id, title);
+    }
+  };
+
+  const handleSleepSandbox = async (id) => {
+    try {
+      await sleepAdminChat(id);
+      refreshAdminChats({ silent: true });
+    } catch {}
+  };
+
   const handleDelete = (id) => {
-    abortRef.current.get(id)?.abort();
+    abortRef.current.get(id)?.controller.abort();
     clearChatQuestion(id);
+    if (isAdminView) setAdminChats(cs => cs.filter(c => c.id !== id));
     deleteChat(id);
     if (id === activeId) setActiveId(null);
     // hapus container sandbox + folder sesi di server
@@ -388,12 +646,19 @@ export default function App() {
 
       <main className="content">
         {active ? (
-          <ChatView
-            messages={active.messages}
-            chatId={active.id}
-            hasPendingQuestion={!!activeQuestion}
-            onOpenQuestion={() => setDismissedQuestionId(null)}
-          />
+          isAdminView && loadingChatId === active.id && !(active.messages?.length) ? (
+            <div className="chat-loading-state">
+              <Loader size={18} className="spin" />
+              <span>Memuat riwayat obrolan…</span>
+            </div>
+          ) : (
+            <ChatView
+              messages={active.messages || []}
+              chatId={active.id}
+              hasPendingQuestion={!!activeQuestion}
+              onOpenQuestion={() => setDismissedQuestionId(null)}
+            />
+          )
         ) : <Welcome name={USER_NAME} />}
       </main>
 
@@ -424,11 +689,15 @@ export default function App() {
       </div>
 
       <Drawer
-        open={drawerOpen} chats={chats} activeId={activeId} userName={USER_NAME}
+        open={drawerOpen} chats={visibleChats} activeId={activeId}
+        isAdmin={isAdminView} loadingIds={loadingIds}
+        onRefresh={() => refreshAdminChats()} refreshing={adminRefreshing}
         onClose={() => setDrawerOpen(false)}
-        onSelect={id => { setActiveId(id); setDrawerOpen(false); }}
-        onNewChat={newChat} onTogglePin={togglePin} onRename={renameChat}
+        onSelect={selectChat}
+        onNewChat={newChat} onTogglePin={handleTogglePin} onRename={handleRename}
         onDelete={handleDelete}
+        onSleepSandbox={handleSleepSandbox}
+        onStopChat={stopChat}
         onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }}
         onOpenAccount={() => { setDrawerOpen(false); setAccountOpen(true); }}
         loggedIn={account?.loggedIn}

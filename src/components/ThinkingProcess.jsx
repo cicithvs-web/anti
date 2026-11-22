@@ -19,7 +19,8 @@ const cleanThought = (t) => String(t || '').replace(/\n{3,}/g, '\n\n').trim();
 
 // Timeline proses berpikir & pemakaian tool — tampil penuh langsung di atas jawaban (mirip Claude).
 export default function ThinkingProcess({ msg, hasPendingQuestion, onOpenQuestion }) {
-  const [collapsed, setCollapsed] = useState(false);
+  // Riwayat lama yang panjang diringkas dulu biar layar lega; live & riwayat singkat tetap terbuka.
+  const [collapsed, setCollapsed] = useState(() => !msg?.streaming && !!msg?.fromHistory && (msg?.steps?.length || 0) > 4);
   const [expandedTool, setExpandedTool] = useState(null);
 
   if (!msg) return null;

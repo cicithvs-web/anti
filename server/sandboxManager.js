@@ -303,3 +303,38 @@ export async function getSandboxInfo(slug) {
     return { exists: false, containerName };
   }
 }
+
+/** Daftar cepat semua container sandbox AntiGPT (slug -> { state, status }). */
+export async function listSandboxes() {
+  const map = new Map();
+  try {
+    const { stdout } = await execFileP('docker', [
+      'ps', '-a',
+      '--filter', `name=^${CONTAINER_PREFIX}`,
+      '--format', '{{.Names}}\t{{.State}}\t{{.Status}}',
+    ], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 8000 });
+    for (const line of stdout.split('\n')) {
+      const s = line.trim();
+      if (!s) continue;
+      const [name, state, ...rest] = s.split('\t');
+      if (!name || !name.startsWith(CONTAINER_PREFIX)) continue;
+      map.set(name.slice(CONTAINER_PREFIX.length), {
+        state: (state || '').trim(),
+        status: rest.join('\t').trim(),
+      });
+    }
+  } catch {}
+  return map;
+}
+
+/** Tidurkan (docker stop) 1 container sandbox tanpa menghapus chat/workspace. */
+export async function stopSandbox(slug) {
+  const safe = slugSafe(slug);
+  lastUsed.delete(safe);
+  try {
+    await execFileP('docker', ['stop', '-t', '3', getSafeContainerName(safe)], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 30_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}

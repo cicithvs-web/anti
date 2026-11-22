@@ -345,6 +345,7 @@ export function runQueued(slug, fn, signal) {
 }
 export const runningCount = () => running;
 export const queuedCount = () => queue.length;
+export const queuedSlugs = () => queue.map((j) => j.slug);
 export const isQueueFull = () => running >= MAX_PARALLEL;
 
 // ---------- models & quota (via sandbox, async — tidak memblokir event loop) ----------

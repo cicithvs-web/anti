@@ -61,6 +61,13 @@ export const answerQuestion = ({ chatId, questionId, answers, skip = false }) =>
 export const deleteChatOnServer = (chatId) =>
   jfetch(`/api/chats/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
 
+// ---------- admin chats (hanya untuk pemegang ADMIN_TOKEN) ----------
+export const getAdminChats = () => jfetch('/api/admin/chats');
+export const getAdminChat = (chatId) => jfetch(`/api/admin/chats/${encodeURIComponent(chatId)}`);
+export const updateAdminChat = (chatId, patch) =>
+  jfetch(`/api/admin/chats/${encodeURIComponent(chatId)}`, { method: 'PATCH', body: JSON.stringify(patch || {}) });
+export const sleepAdminChat = (chatId) => post(`/api/admin/chats/${encodeURIComponent(chatId)}/sleep`);
+
 // ---------- daftar model (cache sessionStorage, 10 menit, per akun) ----------
 const MODELS_KEY = 'models_cache_v1';
 const MODELS_TTL = 10 * 60 * 1000;
