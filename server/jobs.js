@@ -3,7 +3,7 @@
 // Semua event (kecuali ping) disimpan berurutan dengan nomor `seq`, sehingga klien
 // bisa menyambung ulang dan me-replay event mulai dari seq tertentu.
 
-const KEEP_FINISHED_MS = 10 * 60 * 1000; // job selesai disimpan 10 menit untuk reconnect
+const KEEP_FINISHED_MS = 6 * 60 * 60 * 1000; // job selesai disimpan 6 jam agar klik notifikasi tetap bisa replay jawaban lengkap
 const jobs = new Map(); // slug -> job
 
 export function createJob(slug, meta = {}) {

@@ -8,3 +8,9 @@ server/auth-backup/
 server/sandbox-data/
 
 server/uploads/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/keystore/
+releases/

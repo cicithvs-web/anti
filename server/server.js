@@ -354,6 +354,58 @@ app.get('/api/chats/:chatId/images/:filename(*)', (req, res) => serveChatProject
 app.get('/api/chats/:chatId/media/:filename(*)', (req, res) => serveChatProjectFile(req, res, { mediaOnly: true, download: false }));
 app.get('/api/chats/:chatId/files/:filename(*)', (req, res) => serveChatProjectFile(req, res, { download: true }));
 
+// Pratinjau teks/kode/Markdown/CSV/JSON secara aman (maks 1 MB, dikembalikan sebagai JSON bukan HTML dieksekusi)
+const previewTextExts = new Set([
+  '.md', '.markdown', '.txt', '.log', '.csv', '.tsv', '.json', '.jsonl', '.ndjson',
+  '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.py', '.sh', '.bash', '.zsh',
+  '.html', '.htm', '.css', '.scss', '.less', '.sql', '.yaml', '.yml', '.toml',
+  '.ini', '.conf', '.cfg', '.xml', '.svg', '.env', '.go', '.rs', '.java', '.kt',
+  '.c', '.h', '.cpp', '.hpp', '.cs', '.php', '.rb', '.lua', '.swift', '.dart',
+  '.r', '.vue', '.svelte', '.graphql', '.prisma', '.gitignore',
+]);
+const MAX_PREVIEW_BYTES = 1024 * 1024; // 1 MB
+
+app.get('/api/chats/:chatId/preview/:filename(*)', (req, res) => {
+  const rawParam = req.params.filename || req.params[0] || '';
+  let filename = String(rawParam);
+  try { filename = decodeURIComponent(filename); } catch {}
+
+  const filePath = resolveChatFile(req.params.chatId, filename);
+  if (!filePath) return res.status(404).json({ ok: false, error: 'File tidak ditemukan.' });
+
+  const ext = path.extname(filePath).toLowerCase();
+  if (!previewTextExts.has(ext)) {
+    return res.status(415).json({ ok: false, error: 'Format file ini tidak mendukung pratinjau teks.' });
+  }
+
+  let fd;
+  try {
+    const stat = fs.statSync(filePath);
+    const readBytes = Math.min(stat.size, MAX_PREVIEW_BYTES);
+    const buf = Buffer.alloc(readBytes);
+    fd = fs.openSync(filePath, 'r');
+    const n = readBytes > 0 ? fs.readSync(fd, buf, 0, readBytes, 0) : 0;
+    const slice = buf.subarray(0, n);
+    // Tolak file biner (terdeteksi null byte di 8 KB awal)
+    if (slice.subarray(0, Math.min(n, 8192)).includes(0)) {
+      return res.status(415).json({ ok: false, error: 'File biner tidak dapat ditampilkan sebagai teks.' });
+    }
+    res.set('Cache-Control', 'private, max-age=60');
+    return res.json({
+      ok: true,
+      filename: path.basename(filePath),
+      ext: ext.slice(1),
+      size: stat.size,
+      truncated: stat.size > MAX_PREVIEW_BYTES,
+      content: slice.toString('utf8'),
+    });
+  } catch {
+    return res.status(404).json({ ok: false, error: 'Gagal membaca file.' });
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+  }
+});
+
 function cleanupTempFiles(files = []) {
   for (const file of files || []) {
     if (file?.path) {
@@ -424,15 +476,54 @@ app.get('/api/status', (req, res) => {
 });
 
 // ---------- MODELS (agy models) ----------
-// Cache per akun: ganti akun (login/logout) → daftar model diambil ulang otomatis.
-// Daftar kosong tidak di-cache (misal saat belum login), supaya dicoba lagi berikutnya.
-let modelsCache = { email: undefined, models: null };
+// Cache per akun dengan TTL 10 menit + dedupe request bersamaan; ?refresh=1 ambil realtime.
+// Daftar kosong tidak menimpa cache lama (misal saat timeout sementara).
+const MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
+let modelsCache = { email: undefined, at: 0, models: null, pending: null };
 app.get('/api/models', async (req, res) => {
   const email = agy.whoamiEmail() || null;
-  if (req.query.refresh || modelsCache.email !== email || !modelsCache.models?.length) {
-    modelsCache = { email, models: await agy.listModels() };
+  const force = !!req.query.refresh;
+  const fresh = modelsCache.email === email
+    && Array.isArray(modelsCache.models) && modelsCache.models.length > 0
+    && Date.now() - modelsCache.at < MODELS_CACHE_TTL_MS;
+
+  if (force || !fresh) {
+    if (!modelsCache.pending || modelsCache.email !== email) {
+      const prevModels = modelsCache.email === email && Array.isArray(modelsCache.models)
+        ? modelsCache.models : null;
+      const prevAt = modelsCache.email === email ? modelsCache.at : 0;
+      modelsCache.email = email;
+      modelsCache.pending = agy.listModels()
+        .then((list) => {
+          if (Array.isArray(list) && list.length > 0) {
+            modelsCache = { email, at: Date.now(), models: list, pending: null };
+          } else {
+            modelsCache = { email, at: prevAt, models: prevModels || [], pending: null };
+          }
+          return modelsCache.models;
+        })
+        .catch(() => {
+          modelsCache = { email, at: prevAt, models: prevModels || [], pending: null };
+          return modelsCache.models;
+        });
+    }
+    const list = await modelsCache.pending;
+    return res.json({
+      ok: true,
+      email,
+      models: list || [],
+      default: agy.DEFAULT_MODEL,
+      at: modelsCache.at || null,
+    });
   }
-  res.json({ ok: true, email, models: modelsCache.models, default: agy.DEFAULT_MODEL });
+  res.json({
+    ok: true,
+    email,
+    models: modelsCache.models,
+    default: agy.DEFAULT_MODEL,
+    at: modelsCache.at || null,
+    cached: true,
+  });
 });
 
 // ---------- CHAT ----------
@@ -980,10 +1071,113 @@ app.post('/api/admin/chats/:chatId/sleep', requireAdmin, async (req, res) => {
   res.json({ ok: true, slug, stopped });
 });
 
+// ---------- UNDUH APK ANDROID ----------
+const APK_FILE = path.join(__dirname, '../releases/AntiGPT.apk');
+const APK_META_FILE = path.join(__dirname, '../releases/apk-meta.json');
+
+function readApkInfo() {
+  try {
+    if (!fs.existsSync(APK_FILE)) return null;
+    const stat = fs.statSync(APK_FILE);
+    let meta = {};
+    try { meta = JSON.parse(fs.readFileSync(APK_META_FILE, 'utf8')); } catch {}
+    return {
+      exists: true,
+      filename: 'AntiGPT.apk',
+      sizeBytes: stat.size,
+      sizeLabel: `${(stat.size / (1024 * 1024)).toFixed(2)} MB`,
+      versionName: meta.versionName || '1.0.0',
+      versionCode: meta.versionCode || 1,
+      builtAt: meta.builtAt || stat.mtime.toISOString(),
+      sha256: meta.sha256 || '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sendApk(req, res) {
+  if (!fs.existsSync(APK_FILE)) {
+    return res.status(404).json({ ok: false, error: 'File AntiGPT.apk belum tersedia.' });
+  }
+  res.set('Content-Type', 'application/vnd.android.package-archive');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', 'no-cache');
+  return res.download(APK_FILE, 'AntiGPT.apk');
+}
+
+app.get(['/AntiGPT.apk', '/download/AntiGPT.apk'], sendApk);
+
+app.get('/download', (req, res) => {
+  const info = readApkInfo();
+  const available = !!info?.exists;
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.set('Cache-Control', 'no-cache');
+  res.send(`<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#faf9f5" />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <title>Unduh AntiGPT untuk Android</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --bg:#faf9f5; --surface:#fff; --panel:#f5f4ef; --border:#e5e3dc; --text:#1f1e1d; --muted:#6b6a66; --accent:#c96442; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#171614; --surface:#272522; --panel:#211f1c; --border:#403c36; --text:#f3f0e9; --muted:#aaa49a; --accent:#e48763; }
+    }
+    body { min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: calc(20px + env(safe-area-inset-top, 0px)) 16px calc(24px + env(safe-area-inset-bottom, 0px)); background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; }
+    .card { width: 100%; max-width: 400px; background: var(--surface); border: 1px solid var(--border); border-radius: 24px; padding: 28px 22px; text-align: center; box-shadow: 0 8px 30px rgba(0,0,0,.06); }
+    .mark { width: 72px; height: 72px; margin: 0 auto 14px; border-radius: 18px; background: var(--panel); border: 1px solid var(--border); display: grid; place-items: center; }
+    .mark img { width: 50px; height: 50px; object-fit: contain; }
+    h1 { font-family: Georgia, serif; font-weight: 400; font-size: 28px; margin-bottom: 6px; }
+    .sub { color: var(--muted); font-size: 14.5px; line-height: 1.5; margin-bottom: 20px; }
+    .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 18px; }
+    .meta-box { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 10px; }
+    .meta-box small { display: block; color: var(--muted); font-size: 11.5px; margin-bottom: 2px; }
+    .meta-box strong { font-size: 14px; }
+    .btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 14px 18px; border-radius: 14px; background: var(--accent); color: #fff; font-weight: 600; font-size: 15.5px; text-decoration: none; margin-bottom: 10px; }
+    .btn.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); font-size: 14.5px; margin-bottom: 0; }
+    .steps { text-align: left; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted); line-height: 1.6; }
+    .steps ol { padding-left: 18px; margin-top: 6px; }
+    .sha { margin-top: 10px; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--muted); word-break: break-all; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="mark"><img src="/logo.png" alt="AntiGPT" /></div>
+    <h1>AntiGPT</h1>
+    <p class="sub">Aplikasi Android resmi AntiGPT — tampilan pas untuk layar HP, bebas tabrakan status bar &amp; navigasi.</p>
+    ${available ? `
+      <div class="meta">
+        <div class="meta-box"><small>Versi</small><strong>v${info.versionName}</strong></div>
+        <div class="meta-box"><small>Ukuran</small><strong>${info.sizeLabel}</strong></div>
+      </div>
+      <a class="btn" href="/AntiGPT.apk" download="AntiGPT.apk">Unduh AntiGPT.apk</a>
+      <a class="btn secondary" href="/">Buka versi Web</a>
+      <div class="steps">
+        <strong>Cara pasang:</strong>
+        <ol>
+          <li>Ketuk <b>Unduh AntiGPT.apk</b> lalu tunggu unduhan selesai.</li>
+          <li>Buka file <b>AntiGPT.apk</b> dari notifikasi / File Manager.</li>
+          <li>Jika diminta, aktifkan <b>Izinkan dari sumber ini</b>, lalu ketuk <b>Pasang</b>.</li>
+        </ol>
+        ${info.sha256 ? `<div class="sha">SHA-256: ${info.sha256}</div>` : ''}
+      </div>
+    ` : `
+      <p class="sub">APK sedang disiapkan. Silakan coba lagi sebentar lagi.</p>
+      <a class="btn secondary" href="/">Kembali ke AntiGPT</a>
+    `}
+  </main>
+</body>
+</html>`);
+});
+
 // ---------- FRONTEND ----------
 const dist = path.join(__dirname, '../dist');
 app.use(express.static(dist));
-app.get(/^\/(?!api\/|health$).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));
+app.get(/^\/(?!api\/|health$|download(?:\/|$)|AntiGPT\.apk$).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));
 
 // ---------- ERROR HANDLER (termasuk MulterError agar tidak jatuh ke HTTP 500 polos) ----------
 app.use((err, req, res, _next) => {

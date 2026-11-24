@@ -57,6 +57,13 @@ export default function ImageLightbox({ item, onClose, onEdit, onNavigate }) {
 
   useEffect(() => {
     if (!current) return;
+    const onBack = (e) => { e.preventDefault(); onClose(); };
+    window.addEventListener('antigpt:back', onBack);
+    return () => window.removeEventListener('antigpt:back', onBack);
+  }, [current, onClose]);
+
+  useEffect(() => {
+    if (!current) return;
     const onKey = (e) => {
       if (e.key === 'Escape') onClose();
       else if (e.key === 'ArrowLeft' && canPrev) onNavigate(index - 1);

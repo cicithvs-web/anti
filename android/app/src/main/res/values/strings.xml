@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AntiGPT</string>
+    <string name="error_title">Tidak dapat terhubung</string>
+    <string name="error_subtitle">Periksa koneksi internet kamu lalu coba lagi.</string>
+    <string name="retry">Coba lagi</string>
+</resources>

@@ -7,8 +7,44 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import rehypeKatex from 'rehype-katex';
 import rehypeHighlight from 'rehype-highlight';
+import { splitTextWithLinks } from './linkify.js';
 
 const ALERT_TYPES = new Set(['note', 'tip', 'important', 'warning', 'caution']);
+const SKIP_LINKIFY_PARENTS = new Set(['link', 'linkReference', 'definition', 'code', 'inlineCode', 'image', 'html']);
+
+/**
+ * Plugin remark untuk mendeteksi URL & domain polos (mis. github.com/user, gay.my.id)
+ * di teks Markdown (di luar kode & tautan yang sudah ada).
+ */
+export function remarkAutoLinks() {
+  return (tree) => {
+    const walk = (node) => {
+      if (!node || !Array.isArray(node.children) || SKIP_LINKIFY_PARENTS.has(node.type)) return;
+      const next = [];
+      let changed = false;
+      for (const child of node.children) {
+        if (child.type === 'text' && child.value) {
+          const segs = splitTextWithLinks(child.value);
+          if (segs.some((s) => s.type === 'link')) {
+            changed = true;
+            for (const seg of segs) {
+              if (seg.type === 'link') {
+                next.push({ type: 'link', url: seg.href, children: [{ type: 'text', value: seg.text }] });
+              } else {
+                next.push({ type: 'text', value: seg.value });
+              }
+            }
+            continue;
+          }
+        }
+        walk(child);
+        next.push(child);
+      }
+      if (changed) node.children = next;
+    };
+    walk(tree);
+  };
+}
 
 /**
  * Konversi delimiter LaTeX `\[...\]` dan `\(...\)` menjadi `$$...$$` dan `$...$`
@@ -124,6 +160,7 @@ export const REMARK_PLUGINS = [
   remarkGfm,
   remarkMath,
   remarkAlerts,
+  remarkAutoLinks,
 ];
 
 export const REHYPE_PLUGINS = [

@@ -7,7 +7,7 @@ export default function ChatContextMenu({
   const canStop = !!onStopChat && !!chat.jobStatus;
   const canSleep = !!onSleepSandbox && chat.containerState === 'running' && !chat.jobStatus;
   const extraHeight = (canStop ? 48 : 0) + (canSleep ? 48 : 0);
-  const top = Math.max(12, Math.min(y, window.innerHeight - (200 + extraHeight)));
+  const top = Math.max(56, Math.min(y, window.innerHeight - (200 + extraHeight) - 16));
   const act = (fn) => () => { fn(); onClose(); };
 
   return (

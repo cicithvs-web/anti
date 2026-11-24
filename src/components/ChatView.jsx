@@ -1,13 +1,15 @@
 import { Children, createContext, isValidElement, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  Archive, ArrowDown, Check, Copy, Download, ExternalLink, File, Film, ImageOff, Maximize2, Music,
+  Archive, ArrowDown, Check, Copy, Download, File, Film, ImageOff, Maximize2, Music,
   Info, Lightbulb, MessageSquareWarning, AlertTriangle, OctagonAlert,
 } from 'lucide-react';
 import ThinkingProcess from './ThinkingProcess';
 import MermaidDiagram from './MermaidDiagram';
+import FilePreviewModal from './FilePreviewModal';
 import ReactMarkdown from 'react-markdown';
 import 'katex/dist/katex.min.css';
 import { preprocessLatex, REMARK_PLUGINS, REHYPE_PLUGINS } from '../utils/markdownPlugins';
+import { splitTextWithLinks } from '../utils/linkify';
 import { chatFileUrl, chatImageUrl, chatMediaUrl } from '../services/ai';
 import { FileCard, ImageThumb, keyOf } from './AttachmentTray.jsx';
 import ImageLightbox from './ImageLightbox.jsx';
@@ -16,6 +18,24 @@ const InTableContext = createContext(false);
 const VIDEO_RE = /\.(?:mp4|webm|mov|m4v|ogv)$/i;
 const AUDIO_RE = /\.(?:mp3|wav|ogg|m4a|aac|flac)$/i;
 const PDF_RE = /\.pdf$/i;
+const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|avif|svg)$/i;
+const PREVIEW_TEXT_RE = /\.(?:md|markdown|txt|log|csv|tsv|json|jsonl|ndjson|js|mjs|cjs|jsx|ts|tsx|py|sh|bash|zsh|html|htm|css|scss|less|sql|yaml|yml|toml|ini|conf|cfg|xml|env|go|rs|java|kt|c|h|cpp|hpp|cs|php|rb|lua|swift|dart|r|vue|svelte|graphql|prisma)$/i;
+
+function isPreviewableFilename(name = '') {
+  return PDF_RE.test(name) || PREVIEW_TEXT_RE.test(name);
+}
+
+function fileCategoryLabel(ext) {
+  const e = String(ext || '').toUpperCase();
+  if (e === 'PDF') return `Dokumen · ${e}`;
+  if (e === 'MD' || e === 'MARKDOWN') return `Markdown · ${e}`;
+  if (['CSV', 'TSV', 'JSON', 'JSONL', 'YAML', 'YML', 'XML'].includes(e)) return `Data · ${e}`;
+  if (['TXT', 'LOG'].includes(e)) return `Teks · ${e}`;
+  if (['JS', 'MJS', 'CJS', 'JSX', 'TS', 'TSX', 'PY', 'SH', 'BASH', 'HTML', 'CSS', 'SQL', 'GO', 'RS', 'JAVA', 'PHP', 'RB', 'C', 'CPP', 'CS'].includes(e)) {
+    return `Kode · ${e}`;
+  }
+  return e || 'FILE';
+}
 
 const ALERT_META = {
   note: { label: 'Catatan', Icon: Info },
@@ -172,33 +192,59 @@ function ChatImage({ src, alt, chatId, gallery, onOpenMedia }) {
   );
 }
 
-function ChatFileCard({ filename, chatId, showPreview = false }) {
+function ChatFileCard({ filename, chatId, onPreviewFile, onOpenMedia }) {
+  const inTable = useContext(InTableContext);
   const extension = filename.split('.').pop()?.toUpperCase() || 'FILE';
   const isZip = extension === 'ZIP';
   const url = chatFileUrl(chatId, filename);
-  const previewUrl = showPreview ? chatMediaUrl(chatId, filename) : null;
+  const canPreviewTextOrPdf = isPreviewableFilename(filename) && !!onPreviewFile;
+  const canPreviewImg = IMAGE_EXT_RE.test(filename) && !!onOpenMedia;
+  const canPreview = canPreviewTextOrPdf || canPreviewImg;
 
-  if (previewUrl) {
+  const openPreview = () => {
+    if (canPreviewTextOrPdf) onPreviewFile({ chatId, filename });
+    else if (canPreviewImg) {
+      onOpenMedia({ name: filename, url: chatImageUrl(chatId, filename), kind: 'image', downloadUrl: url });
+    }
+  };
+
+  // Di dalam tabel: chip 1 baris klik langsung buka pratinjau (atau unduh jika file biner)
+  if (inTable && canPreview) {
+    return (
+      <button type="button" className="md-file-card" onClick={openPreview} aria-label={`Pratinjau ${filename}`}>
+        <span className="md-file-card-icon"><File size={22} /></span>
+        <span className="md-file-card-info"><strong>{filename}</strong><small>{extension}</small></span>
+      </button>
+    );
+  }
+
+  // Di luar tabel untuk file yang bisa dipratinjau: tap badan kartu = pratinjau penuh, ikon kanan = unduh
+  if (canPreview) {
     return (
       <span className="md-file-card md-file-card-split">
-        <a
+        <button
+          type="button"
           className="md-file-card-main"
-          href={previewUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={`Buka ${filename}`}
+          onClick={openPreview}
+          aria-label={`Pratinjau ${filename}`}
         >
           <span className="md-file-card-icon"><File size={22} /></span>
-          <span className="md-file-card-info"><strong>{filename}</strong><small>{extension} · Buka pratinjau</small></span>
+          <span className="md-file-card-info">
+            <strong>{filename}</strong>
+            <small>{fileCategoryLabel(extension)}</small>
+          </span>
+        </button>
+        <a
+          className="md-file-card-action md-file-card-dl"
+          href={url}
+          download={filename}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Unduh"
+          aria-label={`Unduh ${filename}`}
+        >
+          <Download size={19} />
         </a>
-        <span className="md-file-card-btns">
-          <a className="md-file-card-action" href={previewUrl} target="_blank" rel="noopener noreferrer" title="Buka" aria-label={`Buka ${filename}`}>
-            <ExternalLink size={18} />
-          </a>
-          <a className="md-file-card-action" href={url} download={filename} target="_blank" rel="noopener noreferrer" title="Unduh" aria-label={`Unduh ${filename}`}>
-            <Download size={19} />
-          </a>
-        </span>
       </span>
     );
   }
@@ -311,33 +357,33 @@ function ChatAudioCard({ filename, chatId }) {
   );
 }
 
-// Tautan Markdown tanpa `!` ([file.ext](file.ext)): selalu tampil sebagai kartu file unduh (atau chip di tabel).
-function MarkdownLink({ href = '', children, chatId }) {
+// Tautan Markdown tanpa `!` ([file.ext](file.ext)): kartu file (tap = pratinjau langsung untuk file teks/kode/PDF, ikon kanan = unduh).
+function MarkdownLink({ href = '', children, chatId, onPreviewFile, onOpenMedia }) {
   if (/^https?:\/\//i.test(href)) {
     return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
   }
   const filename = resolveLocalFilename(href);
   if (!filename || !chatId) return <span className="md-filelink">{children}</span>;
-  return <ChatFileCard filename={filename} chatId={chatId} />;
+  return <ChatFileCard filename={filename} chatId={chatId} onPreviewFile={onPreviewFile} onOpenMedia={onOpenMedia} />;
 }
 
 // Sintaks media dengan `!` (![Deskripsi](file.ext)): inisiatif AI menampilkan/memutar langsung di chat.
-function MarkdownMedia({ src = '', alt = '', chatId, gallery, onOpenMedia }) {
+function MarkdownMedia({ src = '', alt = '', chatId, gallery, onOpenMedia, onPreviewFile }) {
   const inTable = useContext(InTableContext);
   const localName = resolveLocalFilename(src);
   if (localName && chatId) {
     if (VIDEO_RE.test(localName)) {
       return inTable
-        ? <ChatFileCard filename={localName} chatId={chatId} />
+        ? <ChatFileCard filename={localName} chatId={chatId} onPreviewFile={onPreviewFile} onOpenMedia={onOpenMedia} />
         : <ChatVideoCard filename={localName} chatId={chatId} onOpenMedia={onOpenMedia} />;
     }
     if (AUDIO_RE.test(localName)) {
       return inTable
-        ? <ChatFileCard filename={localName} chatId={chatId} />
+        ? <ChatFileCard filename={localName} chatId={chatId} onPreviewFile={onPreviewFile} onOpenMedia={onOpenMedia} />
         : <ChatAudioCard filename={localName} chatId={chatId} />;
     }
     if (PDF_RE.test(localName)) {
-      return <ChatFileCard filename={localName} chatId={chatId} showPreview={!inTable} />;
+      return <ChatFileCard filename={localName} chatId={chatId} onPreviewFile={onPreviewFile} onOpenMedia={onOpenMedia} />;
     }
   }
   return <ChatImage src={src} alt={alt} chatId={chatId} gallery={gallery} onOpenMedia={onOpenMedia} />;
@@ -398,7 +444,7 @@ function CodeBlock({ children, lang = '', code = '' }) {
   );
 }
 
-function Markdown({ text, chatId, streaming = false, onOpenMedia }) {
+function Markdown({ text, chatId, streaming = false, onOpenMedia, onPreviewFile }) {
   const processed = useMemo(() => preprocessLatex(text), [text]);
   const gallery = useMemo(() => extractMarkdownImages(text, chatId), [text, chatId]);
   const components = useMemo(() => ({
@@ -409,12 +455,12 @@ function Markdown({ text, chatId, streaming = false, onOpenMedia }) {
       return <CodeBlock lang={lang} code={code}>{children}</CodeBlock>;
     },
     a: ({ href = '', children }) => (
-      <MarkdownLink href={href} chatId={chatId}>{children}</MarkdownLink>
+      <MarkdownLink href={href} chatId={chatId} onPreviewFile={onPreviewFile} onOpenMedia={onOpenMedia}>{children}</MarkdownLink>
     ),
     img: ({ src = '', alt = '' }) => (
-      <MarkdownMedia src={src} alt={alt} chatId={chatId} gallery={gallery} onOpenMedia={onOpenMedia} />
+      <MarkdownMedia src={src} alt={alt} chatId={chatId} gallery={gallery} onOpenMedia={onOpenMedia} onPreviewFile={onPreviewFile} />
     ),
-  }), [chatId, streaming, gallery, onOpenMedia]);
+  }), [chatId, streaming, gallery, onOpenMedia, onPreviewFile]);
   return (
     <ReactMarkdown
       remarkPlugins={REMARK_PLUGINS}
@@ -428,8 +474,8 @@ function Markdown({ text, chatId, streaming = false, onOpenMedia }) {
 }
 
 // Lampiran pesan terkirim: gambar → thumbnail (tap = lightbox), video → kartu play (tap = putar di lightbox),
-// selain itu → kartu file.
-function SentAttachments({ items, chatId, onOpenImage }) {
+// file teks/kode/PDF → tap buka pratinjau, selain itu → kartu file.
+function SentAttachments({ items, chatId, onOpenImage, onPreviewFile }) {
   const [broken, setBroken] = useState(() => new Set());
   const gallery = useMemo(() => {
     const out = [];
@@ -489,27 +535,47 @@ function SentAttachments({ items, chatId, onOpenImage }) {
             />
           );
         }
+        const canPreview = !!f.stored && !!chatId && !!onPreviewFile && isPreviewableFilename(f.name || f.stored);
+        if (canPreview) {
+          return (
+            <FileCard
+              key={keyOf(f)}
+              f={f}
+              onOpen={() => onPreviewFile({ chatId, filename: f.stored, displayName: f.name })}
+            />
+          );
+        }
         return <FileCard key={keyOf(f)} f={f} />;
       })}
     </div>
   );
 }
 
+function UserBubbleText({ text }) {
+  const segs = useMemo(() => splitTextWithLinks(text), [text]);
+  if (!segs.some(s => s.type === 'link')) return text;
+  return segs.map((seg, i) => (
+    seg.type === 'link'
+      ? <a key={i} className="user-link" href={seg.href} target="_blank" rel="noopener noreferrer">{seg.text}</a>
+      : seg.value
+  ));
+}
+
 // Satu pesan. Di-memo: saat streaming hanya pesan terakhir (objeknya berubah) yang dirender ulang,
 // pesan lama tidak di-parse ulang oleh react-markdown.
-const MessageItem = memo(function MessageItem({ m, chatId, hasPendingQuestion, onOpenQuestion, onOpenImage }) {
+const MessageItem = memo(function MessageItem({ m, chatId, hasPendingQuestion, onOpenQuestion, onOpenImage, onPreviewFile }) {
   return (
     <div className={'msg ' + (m.role === 'user' ? 'msg-user' : 'msg-ai')}>
       {m.attachments?.length > 0 && (
-        <SentAttachments items={m.attachments} chatId={chatId} onOpenImage={onOpenImage} />
+        <SentAttachments items={m.attachments} chatId={chatId} onOpenImage={onOpenImage} onPreviewFile={onPreviewFile} />
       )}
       {m.role === 'assistant' && (m.steps || m.streaming) && (
         <ThinkingProcess msg={m} hasPendingQuestion={hasPendingQuestion} onOpenQuestion={onOpenQuestion} />
       )}
       {(m.content || m.role === 'user') && (
         m.role === 'user'
-          ? <div className="bubble">{m.content}</div>
-          : <div className="bubble md"><Markdown text={m.content} chatId={chatId} streaming={!!m.streaming} onOpenMedia={onOpenImage} />{m.streaming && m.content ? <span className="caret" /> : null}</div>
+          ? <div className="bubble"><UserBubbleText text={m.content} /></div>
+          : <div className="bubble md"><Markdown text={m.content} chatId={chatId} streaming={!!m.streaming} onOpenMedia={onOpenImage} onPreviewFile={onPreviewFile} />{m.streaming && m.content ? <span className="caret" /> : null}</div>
       )}
     </div>
   );
@@ -524,7 +590,9 @@ export default function ChatView({ messages, chatId, hasPendingQuestion, onOpenQ
   const prevLenRef = useRef(messages.length);
   const [atBottom, setAtBottom] = useState(true);
   const [lightbox, setLightbox] = useState(null);
+  const [previewFile, setPreviewFile] = useState(null);
   const closeLightbox = useCallback(() => setLightbox(null), []);
+  const closePreviewFile = useCallback(() => setPreviewFile(null), []);
 
   useEffect(() => {
     const box = boxRef.current;
@@ -537,6 +605,11 @@ export default function ChatView({ messages, chatId, hasPendingQuestion, onOpenQ
       setAtBottom(near);
     };
     const onResize = () => {
+      if (stickRef.current) {
+        box.scrollTop = box.scrollHeight;
+        setAtBottom(true);
+        return;
+      }
       const near = checkNear();
       if (near) stickRef.current = true;
       setAtBottom(near);
@@ -560,6 +633,7 @@ export default function ChatView({ messages, chatId, hasPendingQuestion, onOpenQ
     stickRef.current = true;
     setAtBottom(true);
     setLightbox(null);
+    setPreviewFile(null);
     if (box) box.scrollTop = box.scrollHeight;
   }, [chatId]);
 
@@ -593,6 +667,7 @@ export default function ChatView({ messages, chatId, hasPendingQuestion, onOpenQ
               hasPendingQuestion={hasPendingQuestion && i === messages.length - 1}
               onOpenQuestion={onOpenQuestion}
               onOpenImage={setLightbox}
+              onPreviewFile={setPreviewFile}
             />
           ))}
         </div>
@@ -609,6 +684,7 @@ export default function ChatView({ messages, chatId, hasPendingQuestion, onOpenQ
         onClose={closeLightbox}
         onNavigate={(nextIdx) => setLightbox(prev => (prev?.items ? { ...prev, index: nextIdx } : prev))}
       />
+      <FilePreviewModal file={previewFile} onClose={closePreviewFile} />
     </div>
   );
 }

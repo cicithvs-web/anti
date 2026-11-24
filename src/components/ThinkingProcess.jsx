@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Terminal, FileText, FilePen, Globe, Wrench, Sparkles, Loader,
   ChevronDown, ChevronRight, MessageCircleQuestion,
@@ -17,18 +17,32 @@ export const fmtDur = (s) => (s == null ? '' : s < 60 ? `${Math.round(s)} dtk` :
 
 const cleanThought = (t) => String(t || '').replace(/\n{3,}/g, '\n\n').trim();
 
-// Timeline proses berpikir & pemakaian tool — tampil penuh langsung di atas jawaban (mirip Claude).
+// Timeline proses berpikir & pemakaian tool — terbuka saat AI memproses,
+// lalu otomatis menutup rapi begitu AI mulai menulis jawaban atau selesai (pilihan manual user tetap dihormati).
 export default function ThinkingProcess({ msg, hasPendingQuestion, onOpenQuestion }) {
-  // Riwayat lama yang panjang diringkas dulu biar layar lega; live & riwayat singkat tetap terbuka.
-  const [collapsed, setCollapsed] = useState(() => !msg?.streaming && !!msg?.fromHistory && (msg?.steps?.length || 0) > 4);
+  const hasContent = Boolean(msg?.content && String(msg.content).trim());
+  const streaming = Boolean(msg?.streaming);
+  const [collapsed, setCollapsed] = useState(() => !streaming || hasContent);
   const [expandedTool, setExpandedTool] = useState(null);
+  const userToggledRef = useRef(false);
+  const prevRef = useRef({ streaming, hasContent });
+
+  useEffect(() => {
+    const prev = prevRef.current;
+    prevRef.current = { streaming, hasContent };
+    if (userToggledRef.current) return;
+    // Tutup otomatis begitu jawaban mulai ditulis atau saat giliran selesai
+    if ((!prev.hasContent && hasContent) || (prev.streaming && !streaming)) {
+      setCollapsed(true);
+    }
+  }, [streaming, hasContent]);
 
   if (!msg) return null;
   const steps = msg.steps || [];
 
   // Tidak ada langkah sama sekali
   if (steps.length === 0) {
-    if (!msg.streaming || msg.content) return null;
+    if (!streaming || msg.content) return null;
     return (
       <div className="proc-live-only">
         <Sparkles size={15} className="pulse" />
@@ -38,6 +52,10 @@ export default function ThinkingProcess({ msg, hasPendingQuestion, onOpenQuestio
   }
 
   const hasThoughtText = steps.some((s) => s.kind === 'think' && cleanThought(s.text));
+  const toolCount = steps.filter((s) => s.kind !== 'think').length;
+  const doneLabel = toolCount > 0
+    ? `${hasThoughtText ? 'Proses berpikir' : 'Proses'} · ${toolCount} langkah`
+    : (hasThoughtText ? 'Proses berpikir' : 'Proses');
   const lastStep = steps[steps.length - 1];
   const lastRunning = lastStep && lastStep.kind !== 'think' && lastStep.status === 'running';
 
@@ -45,13 +63,16 @@ export default function ThinkingProcess({ msg, hasPendingQuestion, onOpenQuestio
     <div className="proc-inline">
       <button
         type="button"
-        className={'proc-head' + (msg.streaming ? ' live' : '')}
-        onClick={() => setCollapsed((c) => !c)}
+        className={'proc-head' + (streaming ? ' live' : '')}
+        onClick={() => {
+          userToggledRef.current = true;
+          setCollapsed((c) => !c);
+        }}
         aria-expanded={!collapsed}
       >
-        <Sparkles size={14} className={msg.streaming ? 'pulse' : ''} />
-        <span className={'proc-head-text' + (msg.streaming ? ' shimmer' : '')}>
-          {msg.streaming ? (msg.status || 'Berpikir…') : (hasThoughtText ? 'Proses berpikir' : 'Proses')}
+        <Sparkles size={14} className={streaming ? 'pulse' : ''} />
+        <span className={'proc-head-text' + (streaming ? ' shimmer' : '')}>
+          {streaming ? (msg.status || 'Berpikir…') : doneLabel}
         </span>
         <ChevronDown size={15} className={'proc-chev' + (collapsed ? ' closed' : '')} />
       </button>

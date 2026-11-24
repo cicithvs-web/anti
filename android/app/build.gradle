@@ -1,0 +1,72 @@
+plugins {
+    id 'com.android.application'
+}
+
+def appUrl = project.hasProperty('APP_URL') ? project.property('APP_URL') : 'https://gay.my.id'
+def appVersionCode = project.hasProperty('VERSION_CODE') ? project.property('VERSION_CODE').toInteger() : 5
+def appVersionName = project.hasProperty('VERSION_NAME') ? project.property('VERSION_NAME') : '1.0.4'
+
+def ksFile = file('../keystore/antigpt-release.jks')
+def ksPassword = System.getenv('ANTIGPT_KS_PASS') ?: 'antigpt-release-2026'
+def ksAlias = System.getenv('ANTIGPT_KS_ALIAS') ?: 'antigpt'
+
+android {
+    namespace 'id.my.gay.antigpt'
+    compileSdk 35
+    buildToolsVersion '35.0.0'
+
+    defaultConfig {
+        applicationId 'id.my.gay.antigpt'
+        minSdk 24
+        targetSdk 35
+        versionCode appVersionCode
+        versionName appVersionName
+        buildConfigField 'String', 'APP_URL', "\"${appUrl}\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        release {
+            if (ksFile.exists()) {
+                storeFile ksFile
+                storePassword ksPassword
+                keyAlias ksAlias
+                keyPassword ksPassword
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (ksFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.core:core:1.15.0'
+    implementation 'androidx.activity:activity:1.9.3'
+    implementation 'androidx.browser:browser:1.8.0'
+}

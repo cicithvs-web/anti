@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Moon, Type, Gauge, ChevronRight, X, Sun, Monitor, Clock, CalendarDays, RefreshCw } from 'lucide-react';
+import { Moon, Type, Gauge, ChevronRight, X, Sun, Monitor, Clock, CalendarDays, RefreshCw, Smartphone, Bell, BellOff } from 'lucide-react';
 import { cachedQuota, isQuotaPending, loadQuota } from '../services/ai';
 
 const THEMES = [
@@ -197,10 +197,43 @@ function LimitPanel({ onBack, accountEmail }) {
   );
 }
 
+function readNativeNotifState() {
+  try {
+    if (typeof window === 'undefined' || typeof window.AntiGPTNative?.getNotificationState !== 'function') return null;
+    const raw = window.AntiGPTNative.getNotificationState();
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function SettingsSheet({ open, onClose, theme, onChangeTheme, font, onChangeFont, accountEmail }) {
   const [page, setPage] = useState('main'); // 'main' | 'font' | 'limit'
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);
+  const [notifState, setNotifState] = useState(() => readNativeNotifState());
+
+  useEffect(() => {
+    if (!open) return;
+    setNotifState(readNativeNotifState());
+    const onChanged = (st) => {
+      if (st && typeof st === 'object') setNotifState(st);
+      else setNotifState(readNativeNotifState());
+    };
+    window.__antigptNotifStateChanged = onChanged;
+    return () => {
+      if (window.__antigptNotifStateChanged === onChanged) delete window.__antigptNotifStateChanged;
+    };
+  }, [open]);
+
+  const toggleNotif = () => {
+    if (!notifState) return;
+    const activeNow = !!notifState.enabled && !!notifState.granted && notifState.systemEnabled !== false;
+    try {
+      window.AntiGPTNative?.setNotificationsEnabled?.(!activeNow);
+      setTimeout(() => setNotifState(readNativeNotifState()), 120);
+    } catch {}
+  };
 
   // Prefetch kuota realtime di belakang layar saat sheet Pengaturan dibuka
   useEffect(() => {
@@ -248,6 +281,36 @@ export default function SettingsSheet({ open, onClose, theme, onChangeTheme, fon
 
             <Card icon={Type} title="Gaya font" subtitle={font} onClick={() => setPage('font')} />
             <Card icon={Gauge} title="Limit" subtitle="Kuota pemakaian model" onClick={() => setPage('limit')} />
+            {notifState?.supported && (() => {
+              const active = !!notifState.enabled && !!notifState.granted && notifState.systemEnabled !== false;
+              const denied = !!notifState.enabled && (!notifState.granted || notifState.systemEnabled === false);
+              const sub = active
+                ? 'Aktif · Beri tahu saat AI selesai di latar belakang'
+                : denied
+                  ? 'Izin belum aktif · Ketuk untuk mengizinkan'
+                  : 'Nonaktif';
+              return (
+                <Card
+                  icon={active ? Bell : BellOff}
+                  title="Notifikasi"
+                  subtitle={sub}
+                  onClick={toggleNotif}
+                  right={(
+                    <span className={'settings-switch' + (active ? ' on' : '')} aria-hidden="true">
+                      <span className="settings-switch-thumb" />
+                    </span>
+                  )}
+                />
+              );
+            })()}
+            {typeof window !== 'undefined' && !window.AntiGPTNative && !/AntiGPT-Android/i.test(navigator.userAgent) && (
+              <Card
+                icon={Smartphone}
+                title="Aplikasi Android (.apk)"
+                subtitle="Unduh & pasang AntiGPT di HP"
+                onClick={() => { window.location.href = '/download'; }}
+              />
+            )}
           </div>
         )}
 

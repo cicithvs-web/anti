@@ -1,0 +1,32 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_SDK_ROOT=/opt/android-sdk
+ENV GRADLE_VERSION=8.10.2
+ENV PATH="${JAVA_HOME}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/build-tools/35.0.0:/opt/gradle/gradle-${GRADLE_VERSION}/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      openjdk-17-jdk-headless \
+      curl \
+      unzip \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Gradle
+RUN mkdir -p /opt/gradle \
+    && curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip \
+    && unzip -q /tmp/gradle.zip -d /opt/gradle \
+    && rm -f /tmp/gradle.zip
+
+# Install Android Command Line Tools + SDK 35 + Build Tools 35.0.0
+RUN mkdir -p "${ANDROID_HOME}/cmdline-tools" \
+    && curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o /tmp/cmdline-tools.zip \
+    && unzip -q /tmp/cmdline-tools.zip -d "${ANDROID_HOME}/cmdline-tools" \
+    && mv "${ANDROID_HOME}/cmdline-tools/cmdline-tools" "${ANDROID_HOME}/cmdline-tools/latest" \
+    && rm -f /tmp/cmdline-tools.zip \
+    && yes | sdkmanager --licenses >/dev/null \
+    && sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+WORKDIR /workspace

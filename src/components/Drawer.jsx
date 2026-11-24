@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, MessageCircle, Settings, UserRound, RefreshCw, Loader, Shield } from 'lucide-react';
 import { useLongPress } from '../hooks/useLongPress';
 import ChatContextMenu from './ChatContextMenu';
@@ -30,6 +30,16 @@ export default function Drawer({
 }) {
   const [menu, setMenu] = useState(null);
   const [dialog, setDialog] = useState(null);
+
+  useEffect(() => {
+    if (!menu && !dialog) return;
+    const onBack = (e) => {
+      if (dialog) { setDialog(null); e.preventDefault(); }
+      else if (menu) { setMenu(null); e.preventDefault(); }
+    };
+    window.addEventListener('antigpt:back', onBack);
+    return () => window.removeEventListener('antigpt:back', onBack);
+  }, [menu, dialog]);
 
   const isRunningChat = (c) => !!c.jobStatus || !!loadingIds?.has(c.id);
   const runningList = isAdmin

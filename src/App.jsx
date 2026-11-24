@@ -15,6 +15,7 @@ import AuthGate from './components/AuthGate';
 import ImageEditor from './components/ImageEditor';
 import ImageLightbox from './components/ImageLightbox';
 import { isEditableImage } from './services/imageEdit';
+import { installNativeImeBridge } from './utils/nativeIme';
 import { useChats, newId } from './hooks/useChats';
 import {
   apiStatus, authCheck, AUTH_EVENT, startChatStream, resumeChatStream, formatDone,
@@ -38,6 +39,7 @@ export default function App() {
   // model default untuk chat BARU (= model terakhir yang dipilih)
   const [model, setModel] = useState(() => localStorage.getItem('model') || DEFAULT_MODEL);
   const [models, setModels] = useState(() => cachedModels()?.list || MODELS);
+  const [modelsRefreshing, setModelsRefreshing] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const [attachError, setAttachError] = useState('');
   // Foto yang sedang dibuka di editor: { item, index } — index null = foto baru, angka = lampiran yang diedit ulang
@@ -143,12 +145,49 @@ export default function App() {
     return () => window.removeEventListener(AUTH_EVENT, onAuth);
   }, []);
 
-  // Terapkan tema ke <html>
+  // Terapkan tema ke <html>, sinkronkan <meta name="theme-color">, dan kabari APK Android (status/nav bar)
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = theme;
     localStorage.setItem('theme', theme);
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
+    const syncChrome = () => {
+      const dark = theme === 'dark' || (theme === 'system' && !!mq?.matches);
+      const bg = dark ? '#171614' : '#faf9f5';
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', bg);
+      try { window.AntiGPTNative?.setTheme?.(bg, dark); } catch {}
+    };
+    syncChrome();
+    if (theme === 'system' && mq?.addEventListener) {
+      mq.addEventListener('change', syncChrome);
+      return () => mq.removeEventListener('change', syncChrome);
+    }
   }, [theme]);
+
+  // Sinkronisasi animasi keyboard (IME) per-frame dari APK Android
+  useEffect(() => installNativeImeBridge(), []);
+
+  // Handler tombol Back Android (dipanggil oleh APK native sebelum keluar)
+  const uiLayersRef = useRef({});
+  uiLayersRef.current = { editing, preview, questionOpen, activeQuestionId: activeQuestion?.id || null, settingsOpen, accountOpen, sheet, drawerOpen };
+  useEffect(() => {
+    window.__antigptHandleBack = () => {
+      const ev = new CustomEvent('antigpt:back', { cancelable: true });
+      window.dispatchEvent(ev);
+      if (ev.defaultPrevented) return true;
+      const s = uiLayersRef.current;
+      if (s.editing) { setEditing(null); return true; }
+      if (s.preview) { setPreview(null); return true; }
+      if (s.questionOpen && s.activeQuestionId) { setDismissedQuestionId(s.activeQuestionId); return true; }
+      if (s.settingsOpen) { setSettingsOpen(false); return true; }
+      if (s.accountOpen) { setAccountOpen(false); return true; }
+      if (s.sheet) { setSheet(null); return true; }
+      if (s.drawerOpen) { setDrawerOpen(false); return true; }
+      return false;
+    };
+    return () => { delete window.__antigptHandleBack; };
+  }, []);
 
   // Terapkan gaya font ke <body>
   useEffect(() => {
@@ -247,12 +286,21 @@ export default function App() {
     return () => clearInterval(t);
   }, [authed, isAdminView, drawerOpen, refreshAdminChats]);
 
-  // daftar model: dari cache sessionStorage, diambil ulang kalau kadaluarsa / akun berganti
+  // daftar model: dari cache sessionStorage (TTL 10 menit), diambil ulang kalau kadaluarsa / akun berganti / klik refresh
   const refreshModels = useCallback((force = false) => {
-    loadModels({ email: account?.email ?? undefined, force })
-      .then(list => { if (list?.length) setModels(list); })
-      .catch(() => {});
-  }, [account?.email]);
+    if (force) setModelsRefreshing(true);
+    return loadModels({ email: account?.email ?? undefined, force })
+      .then(list => {
+        if (list?.length) {
+          setModels(list);
+          if (account?.loggedIn) {
+            setModel(cur => (list.some(m => m.id === cur) ? cur : list[0].id));
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => { if (force) setModelsRefreshing(false); });
+  }, [account?.email, account?.loggedIn]);
   useEffect(() => { if (authed) refreshModels(); }, [authed, refreshModels]);
 
   const active = visibleChats.find(c => c.id === activeId);
@@ -275,6 +323,7 @@ export default function App() {
   // ---- stop: hentikan job di server + putus stream di browser ----
   const stopChat = (id) => {
     if (!id) return;
+    try { window.AntiGPTNative?.unwatchJob?.(id); } catch {}
     apiStopChat(id).catch(() => {});
     abortRef.current.get(id)?.controller.abort();
     if (isAdminViewRef.current) {
@@ -304,11 +353,15 @@ export default function App() {
 
   // Ikuti job chat di server sampai `done`. Koneksi putus → sambung ulang otomatis (replay dari seq terakhir).
   // open(signal, onEvent) = request pertama (POST mulai job, atau GET resume).
-  async function followJob(id, open, { resetOnFirstEvent = false, isServer = false } = {}) {
+  async function followJob(id, open, { resetOnFirstEvent = false, isServer = false, title = '' } = {}) {
     setChatLoading(id, true);
     const controller = new AbortController();
     const { signal } = controller;
     abortRef.current.set(id, { controller, isServer });
+    const jobTitle = title
+      || (isServer ? adminChatsRef.current : localChatsRef.current).find(c => c.id === id)?.title
+      || '';
+    try { window.AntiGPTNative?.watchJob?.(id, jobTitle, -1); } catch {}
     const upd = (fn) => storeUpdateLastMessage(id, m => (m.role === 'assistant' ? { ...m, ...fn(m) } : m), isServer);
     const updMeta = (patch) => { if (isServer) updateAdminChatState(id, c => ({ ...c, ...patch })); };
     const t0 = Date.now();
@@ -319,6 +372,7 @@ export default function App() {
       if (typeof ev.seq === 'number') {
         if (ev.seq <= lastSeq) return; // event duplikat saat replay
         lastSeq = ev.seq;
+        try { window.AntiGPTNative?.updateJobSeq?.(id, lastSeq); } catch {}
       }
       if (needReset) { needReset = false; clearChatQuestion(id); upd(() => ({ content: '', steps: [] })); }
       if (ev.type === 'uploads') {
@@ -411,6 +465,7 @@ export default function App() {
     } finally {
       if (abortRef.current.get(id)?.controller === controller) abortRef.current.delete(id);
       if (!(signal.aborted && signal.reason === 'detach')) {
+        try { window.AntiGPTNative?.unwatchJob?.(id); } catch {}
         clearChatQuestion(id);
         setChatLoading(id, false);
         if (isServer && isAdminViewRef.current) {
@@ -479,6 +534,73 @@ export default function App() {
     if (isAdminViewRef.current) loadAdminChat(id);
   };
 
+  // Saat user mengetuk notifikasi Android → buka langsung chat yang dimaksud & sambung/muat jawabannya
+  const openChatFromNotification = useCallback((chatId) => {
+    if (!chatId) return;
+    setDrawerOpen(false);
+    setSettingsOpen(false);
+    setAccountOpen(false);
+    setSheet(null);
+    if (isAdminViewRef.current) {
+      setActiveId(chatId);
+      loadAdminChat(chatId);
+      return;
+    }
+    const found = localChatsRef.current.find(c => c.id === chatId);
+    if (!found) return;
+    setActiveId(chatId);
+    const last = found.messages?.[found.messages.length - 1];
+    if (last?.role === 'assistant' && last.streaming && !abortRef.current.has(chatId)) {
+      followJob(
+        chatId,
+        (signal, onEvent) => resumeChatStream({ chatId, since: 0, signal }, onEvent),
+        { resetOnFirstEvent: true, isServer: false, title: found.title || '' },
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadAdminChat]);
+
+  useEffect(() => {
+    if (authed !== true) return;
+    window.__antigptOpenChat = openChatFromNotification;
+    try {
+      const pending = window.AntiGPTNative?.consumePendingChatId?.();
+      if (pending) openChatFromNotification(pending);
+    } catch {}
+    return () => {
+      if (window.__antigptOpenChat === openChatFromNotification) delete window.__antigptOpenChat;
+    };
+  }, [authed, openChatFromNotification]);
+
+  // Saat kembali dari background ke APK/tab → pastikan chat yang masih streaming segera tersambung ulang
+  useEffect(() => {
+    if (authed !== true) return;
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (isAdminViewRef.current) {
+        const aid = activeIdRef.current;
+        if (aid && !abortRef.current.has(aid)) {
+          const cur = adminChatsRef.current.find(c => c.id === aid);
+          if (cur?.jobStatus) loadAdminChat(aid);
+        }
+        return;
+      }
+      for (const c of localChatsRef.current) {
+        const last = c.messages?.[c.messages.length - 1];
+        if (last?.role === 'assistant' && last.streaming && !abortRef.current.has(c.id)) {
+          followJob(
+            c.id,
+            (signal, onEvent) => resumeChatStream({ chatId: c.id, since: 0, signal }, onEvent),
+            { resetOnFirstEvent: true, isServer: false, title: c.title || '' },
+          );
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed, loadAdminChat]);
+
   async function handleSend(input) {
     // ChatInput mengirim { text, files }; tetap dukung string biasa
     const text = typeof input === 'string' ? input : (input?.text ?? '');
@@ -491,12 +613,13 @@ export default function App() {
     const isServer = isAdminView;
 
     let id = activeId;
+    let chatTitle = active?.title || '';
     if (!id) {
+      chatTitle = (text.replace(/\s+/g, ' ').trim() || files[0]?.name || 'Chat baru').slice(0, 60);
       if (isServer) {
         id = newId();
-        const title = (text.replace(/\s+/g, ' ').trim() || files[0]?.name || 'Chat baru').slice(0, 60);
         setAdminChats(cs => [{
-          id, title, pinned: false, model: useModel, messages: [], updatedAt: Date.now(),
+          id, title: chatTitle, pinned: false, model: useModel, messages: [], updatedAt: Date.now(),
           serverChat: true, loaded: true, jobStatus: 'running', jobDetail: 'Menyiapkan…', jobStartedAt: Date.now(),
         }, ...cs]);
       } else {
@@ -509,7 +632,7 @@ export default function App() {
     storeAddMessage(id, userMsg, isServer);
     // placeholder jawaban AI: diisi bertahap oleh stream (langkah proses + teks)
     storeAddMessage(id, { role: 'assistant', content: '', steps: [], streaming: true, status: 'Menyiapkan…', startedAt: Date.now() }, isServer);
-    await followJob(id, (signal, onEvent) => startChatStream({ chatId: id, model: useModel, text, files, signal }, onEvent), { isServer });
+    await followJob(id, (signal, onEvent) => startChatStream({ chatId: id, model: useModel, text, files, signal }, onEvent), { isServer, title: chatTitle });
   }
 
   const handleTogglePin = (id) => {
@@ -540,6 +663,7 @@ export default function App() {
   };
 
   const handleDelete = (id) => {
+    try { window.AntiGPTNative?.unwatchJob?.(id); } catch {}
     abortRef.current.get(id)?.controller.abort();
     clearChatQuestion(id);
     if (isAdminView) setAdminChats(cs => cs.filter(c => c.id !== id));
@@ -716,8 +840,16 @@ export default function App() {
       <ImageEditor item={editing?.item} onDone={finishEdit} onError={failEdit}
         onCancel={() => setEditing(null)} />
 
-      <ModelSheet open={sheet === 'model'} onClose={() => setSheet(null)}
-        model={chatModel} list={models} onOpen={() => refreshModels(false)} onChangeModel={changeModel} />
+      <ModelSheet
+        open={sheet === 'model'}
+        onClose={() => setSheet(null)}
+        model={chatModel}
+        list={models}
+        refreshing={modelsRefreshing}
+        onOpen={() => refreshModels(false)}
+        onRefresh={() => refreshModels(true)}
+        onChangeModel={changeModel}
+      />
 
       <QuestionSheet
         open={questionOpen}

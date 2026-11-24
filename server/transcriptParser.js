@@ -74,10 +74,52 @@ export function parseUserRequest(rawContent, sessionDir = '') {
   return { text, attachments };
 }
 
-function transcriptPath(brainDir, conversationId) {
+function transcriptPath(brainDir, conversationId, full = false) {
   const id = String(conversationId || '').trim();
   if (!brainDir || !/^[a-zA-Z0-9_-]{8,128}$/.test(id)) return null;
-  return path.join(brainDir, id, '.system_generated', 'logs', 'transcript.jsonl');
+  return path.join(brainDir, id, '.system_generated', 'logs', full ? 'transcript_full.jsonl' : 'transcript.jsonl');
+}
+
+function hydrateTruncatedSteps(steps, brainDir, conversationId) {
+  const need = new Set();
+  for (const st of steps) {
+    if (st.type !== 'USER_INPUT' && st.type !== 'PLANNER_RESPONSE' && st.type !== 'ERROR_MESSAGE') continue;
+    const hasTruncFlag = Array.isArray(st.truncated_fields) && st.truncated_fields.length > 0;
+    const hasTruncText = typeof st.content === 'string' && st.content.includes('<truncated ');
+    if ((hasTruncFlag || hasTruncText) && st.step_index != null) {
+      need.add(st.step_index);
+    }
+  }
+  if (!need.size) return steps;
+
+  const fullFile = transcriptPath(brainDir, conversationId, true);
+  if (!fullFile) return steps;
+  let fullRaw;
+  try { fullRaw = fs.readFileSync(fullFile, 'utf8'); } catch { return steps; }
+
+  const fullByIndex = new Map();
+  for (const line of fullRaw.split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    let st;
+    try { st = JSON.parse(s); } catch { continue; }
+    if (st.step_index != null && need.has(st.step_index)) {
+      fullByIndex.set(st.step_index, st);
+      if (fullByIndex.size === need.size) break;
+    }
+  }
+  if (!fullByIndex.size) return steps;
+
+  return steps.map((st) => {
+    const full = st.step_index != null ? fullByIndex.get(st.step_index) : null;
+    if (!full) return st;
+    return {
+      ...st,
+      ...(full.content !== undefined ? { content: full.content } : {}),
+      ...(full.thinking !== undefined ? { thinking: full.thinking } : {}),
+      ...(full.tool_calls !== undefined ? { tool_calls: full.tool_calls } : {}),
+    };
+  });
 }
 
 /**
@@ -122,6 +164,14 @@ export function parseTranscriptMessages(brainDir, conversationId, sessionDir, { 
   let raw;
   try { raw = fs.readFileSync(file, 'utf8'); } catch { return { messages: [], lastStepTs: 0 }; }
 
+  const rawSteps = [];
+  for (const line of raw.split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    try { rawSteps.push(JSON.parse(s)); } catch {}
+  }
+  const steps = hydrateTruncatedSteps(rawSteps, brainDir, conversationId);
+
   const messages = [];
   let currentAi = null;
   let pendingToolSteps = [];
@@ -145,11 +195,7 @@ export function parseTranscriptMessages(brainDir, conversationId, sessionDir, { 
     pendingToolSteps = [];
   };
 
-  for (const line of raw.split('\n')) {
-    const s = line.trim();
-    if (!s) continue;
-    let step;
-    try { step = JSON.parse(s); } catch { continue; }
+  for (const step of steps) {
 
     const ts = step.created_at ? Date.parse(step.created_at) : 0;
     if (Number.isFinite(ts) && ts > lastStepTs) lastStepTs = ts;

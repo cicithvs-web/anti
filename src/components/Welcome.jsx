@@ -10,7 +10,7 @@ function greeting() {
 export default function Welcome({ name }) {
   return (
     <div className="welcome">
-      <div className="welcome-mark">✻</div>
+      <img className="welcome-logo" src="/logo.png" alt="AntiGPT" width="58" height="58" />
       <h1>{greeting()}, {name}</h1>
       <p>Mau nanya apa hari ini?</p>
     </div>

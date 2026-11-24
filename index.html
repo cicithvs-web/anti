@@ -3,7 +3,33 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="theme-color" content="#faf9f5" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
     <title>AntiGPT</title>
+    <script>
+      (function () {
+        try {
+          var root = document.documentElement;
+          var t = localStorage.getItem('theme') || 'system';
+          root.dataset.theme = t;
+          var dark = t === 'dark' || (t === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var bg = dark ? '#171614' : '#faf9f5';
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.setAttribute('content', bg);
+          if (window.AntiGPTNative || /AntiGPT-Android/i.test(navigator.userAgent)) {
+            root.dataset.nativeInsets = '1';
+            if (window.AntiGPTNative && window.AntiGPTNative.setTheme) {
+              window.AntiGPTNative.setTheme(bg, dark);
+            }
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

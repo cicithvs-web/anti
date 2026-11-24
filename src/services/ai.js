@@ -43,12 +43,15 @@ export async function adminLogin(token) {
 export const adminLogout = () => post('/api/admin/logout');
 
 export const apiStatus = () => jfetch('/api/status');
-export const getModels = () => jfetch('/api/models');
+export const getModels = ({ refresh = false } = {}) =>
+  jfetch('/api/models' + (refresh ? '?refresh=1' : ''));
 export const getQuota = ({ refresh = false } = {}) =>
   jfetch('/api/quota' + (refresh ? '?refresh=1' : ''));
 export const chatFileUrl = (chatId, filename) => `${BASE}/api/chats/${encodeURIComponent(chatId)}/files/${encodeURIComponent(filename)}`;
 export const chatMediaUrl = (chatId, filename) => `${BASE}/api/chats/${encodeURIComponent(chatId)}/media/${encodeURIComponent(filename)}`;
 export const chatImageUrl = (chatId, filename) => `${BASE}/api/chats/${encodeURIComponent(chatId)}/images/${encodeURIComponent(filename)}`;
+export const getChatFilePreview = (chatId, filename) =>
+  jfetch(`/api/chats/${encodeURIComponent(chatId)}/preview/${encodeURIComponent(filename)}`);
 
 export const loginStart = () => post('/api/login');
 export const loginStatus = () => jfetch('/api/login/status');
@@ -76,12 +79,14 @@ export function cachedModels() {
   try { return JSON.parse(sessionStorage.getItem(MODELS_KEY) || 'null'); } catch { return null; }
 }
 let modelsPending = null;
+let modelsPendingForced = false;
 export async function loadModels({ email, force = false } = {}) {
   const c = cachedModels();
   const fresh = c?.list?.length && Date.now() - c.at < MODELS_TTL && (email === undefined || c.email === email);
   if (fresh && !force) return c.list;
-  if (!modelsPending) {
-    modelsPending = getModels()
+  if (!modelsPending || (force && !modelsPendingForced)) {
+    modelsPendingForced = !!force;
+    const p = getModels({ refresh: !!force })
       .then((r) => {
         const list = (r.models || []).map((m) => ({ id: m.id, name: m.name, desc: m.id }));
         if (list.length) {
@@ -89,7 +94,10 @@ export async function loadModels({ email, force = false } = {}) {
         }
         return list.length ? list : (c?.list || []);
       })
-      .finally(() => { modelsPending = null; });
+      .finally(() => {
+        if (modelsPending === p) { modelsPending = null; modelsPendingForced = false; }
+      });
+    modelsPending = p;
   }
   return modelsPending;
 }
