@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -e
+
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+  exec /usr/bin/pip3 "$@"
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --target|--target=*|-t|--prefix|--prefix=*|--user|--root|--root=*)
+      exec /usr/bin/pip3 "$@"
+      ;;
+  esac
+done
+
+subcmd=""
+for arg in "$@"; do
+  case "$arg" in
+    -*) ;;
+    *) subcmd="$arg"; break ;;
+  esac
+done
+
+if [ -d /opt/shared ] && { [ "$subcmd" = "install" ] || [ "$subcmd" = "uninstall" ]; }; then
+  mkdir -p /opt/shared/.locks /opt/shared/pyuser /opt/shared/cache/pip
+  if [ "$subcmd" = "install" ]; then
+    exec flock -w 300 /opt/shared/.locks/pip.lock /usr/bin/pip3 "$@" --user --break-system-packages
+  else
+    exec flock -w 300 /opt/shared/.locks/pip.lock /usr/bin/pip3 "$@" --break-system-packages
+  fi
+fi
+
+exec /usr/bin/pip3 "$@"

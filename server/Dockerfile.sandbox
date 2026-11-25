@@ -1,33 +1,79 @@
 FROM ubuntu:24.04
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
 
-# ── Base tools + Python + Node ──────────────────────────────────────
+# ── 1. Super-Complete System, Media, PDF, OCR, Fonts, DB & Dev Tools ───────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash \
-    ca-certificates \
-    curl \
-    wget \
-    git \
-    unzip \
-    zip \
-    jq \
-    xz-utils \
-    util-linux \
-    iputils-ping \
-    build-essential \
-    python3 \
-    python3-pip \
-    python3-venv \
+    bash zsh tmux ca-certificates curl wget aria2 git git-lfs openssh-client rsync \
+    gnupg sudo locales tzdata procps psmisc lsof htop tree file less nano vim-tiny bc \
+    ripgrep fd-find fzf jq gawk sed grep patch diffutils findutils dos2unix xmlstarlet \
+    zip unzip p7zip-full xz-utils bzip2 gzip zstd lz4 tar cpio \
+    build-essential cmake ninja-build pkg-config autoconf automake libtool \
+    sqlite3 libsqlite3-dev postgresql-client redis-tools \
+    iproute2 iputils-ping dnsutils netcat-openbsd socat openssl \
+    ffmpeg sox libsox-fmt-all mediainfo libimage-exiftool-perl \
+    imagemagick webp librsvg2-bin optipng jpegoptim pngquant potrace graphviz \
+    poppler-utils qpdf ghostscript pandoc \
+    tesseract-ocr tesseract-ocr-eng tesseract-ocr-ind \
+    libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 libffi-dev shared-mime-info \
+    fontconfig fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-color-emoji fonts-freefont-ttf \
+    libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libxkbcommon0 \
+    libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 \
+    python3 python3-pip python3-venv python3-dev \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
 
-# ── Antigravity CLI ─────────────────────────────────────────────────
-# Terpasang di /root/.local/bin/agy (path yang dipakai sandboxManager).
+# ── 2. Global Node Tooling (baked into read-only base layer) ───────────────
+RUN npm install -g pnpm yarn typescript tsx \
+    && npm cache clean --force
+
+# ── 3. Heavy Scientific/Vision/Data Python Packages via Fast Ubuntu Mirror ─
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-numpy python3-scipy python3-pandas python3-matplotlib python3-sympy \
+    python3-tabulate python3-pil python3-opencv python3-qrcode python3-mutagen \
+    python3-reportlab python3-openpyxl python3-markdown python3-jinja2 \
+    python3-requests python3-httpx python3-aiohttp python3-bs4 python3-lxml \
+    python3-flask python3-yaml python3-dotenv python3-pydantic python3-rich python3-tqdm \
+    yt-dlp \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
+
+# ── 4. Extra Python Visualization/Office/API via Ubuntu + PDF/Office via pip
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-seaborn python3-plotly python3-imageio python3-pypdf \
+    python3-docx python3-xlsxwriter python3-uvicorn python3-fastapi mupdf-tools \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
+    && printf "[global]\nbreak-system-packages = true\ntimeout = 180\nretries = 10\n" > /etc/pip.conf \
+    && /usr/bin/pip3 install --no-cache-dir --break-system-packages --timeout 180 --retries 10 \
+      python-pptx pdfplumber fpdf2 weasyprint
+
+# ── 5. Antigravity CLI ─────────────────────────────────────────────────────
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
 
-ENV PATH="/root/.local/bin:${PATH}"
+# ── 6. Concurrency-Safe Shared Package Wrappers (/opt/shared + flock) ──────
+COPY sandbox-scripts/pip /usr/local/sbin/pip
+COPY sandbox-scripts/npm /usr/local/sbin/npm
+COPY sandbox-scripts/apt-get /usr/local/sbin/apt-get
+COPY sandbox-scripts/sync-shared-apt /usr/local/bin/sync-shared-apt
+
+RUN mkdir -p /opt/shared \
+    && cp /usr/local/sbin/pip /usr/local/sbin/pip3 \
+    && cp /usr/local/sbin/apt-get /usr/local/sbin/apt \
+    && chmod +x /usr/local/sbin/pip /usr/local/sbin/pip3 /usr/local/sbin/npm \
+       /usr/local/sbin/apt-get /usr/local/sbin/apt /usr/local/bin/sync-shared-apt
+
+ENV PYTHONUSERBASE="/opt/shared/pyuser" \
+    PIP_CACHE_DIR="/opt/shared/cache/pip" \
+    UV_CACHE_DIR="/opt/shared/cache/uv" \
+    NPM_CONFIG_PREFIX="/opt/shared/npm" \
+    NPM_CONFIG_CACHE="/opt/shared/cache/npm" \
+    PATH="/root/.local/bin:/opt/shared/bin:/opt/shared/pyuser/bin:/opt/shared/npm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+LABEL antigpt.image.v="2"
 
 WORKDIR /home/AntiGPT
 

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -e
+
+REAL_BIN="/usr/bin/$(basename "$0")"
+subcmd=""
+pkgs=()
+for arg in "$@"; do
+  case "$arg" in
+    -*) ;;
+    update|upgrade|dist-upgrade|full-upgrade|install|remove|purge|autoremove|clean|autoclean|source|build-dep|check|download|changelog|info|list|search|show)
+      if [ -z "$subcmd" ]; then subcmd="$arg"; elif [ "$subcmd" = "install" ]; then pkgs+=("$arg"); fi
+      ;;
+    *)
+      if [ "$subcmd" = "install" ]; then pkgs+=("$arg"); fi
+      ;;
+  esac
+done
+
+if [ -d /opt/shared ] && [ "$subcmd" = "install" ]; then
+  mkdir -p /opt/shared/.locks /opt/shared/apt/deb-pool /var/cache/apt/archives/partial
+  flock -s -w 120 /opt/shared/.locks/apt.lock bash -c '
+    shopt -s nullglob
+    for f in /opt/shared/apt/deb-pool/*.deb; do
+      base="$(basename "$f")"
+      [ -e "/var/cache/apt/archives/$base" ] || cp -l "$f" "/var/cache/apt/archives/$base" 2>/dev/null || cp -p "$f" "/var/cache/apt/archives/$base" 2>/dev/null || true
+    done
+  ' || true
+
+  set +e
+  "$REAL_BIN" -o APT::Keep-Downloaded-Packages=true "$@"
+  rc=$?
+  set -e
+
+  if [ "$rc" -eq 0 ]; then
+    flock -x -w 120 /opt/shared/.locks/apt.lock bash -c '
+      shopt -s nullglob
+      for f in /var/cache/apt/archives/*.deb; do
+        base="$(basename "$f")"
+        if [ ! -e "/opt/shared/apt/deb-pool/$base" ]; then
+          cp -p "$f" "/opt/shared/apt/deb-pool/$base.$$" && mv -f "/opt/shared/apt/deb-pool/$base.$$" "/opt/shared/apt/deb-pool/$base"
+        fi
+      done
+      touch /opt/shared/apt/extra-packages.txt
+      for p in "$@"; do
+        case "$p" in
+          /*.deb|./*.deb|../*.deb|*/*) ;;
+          [a-zA-Z0-9]*)
+            grep -qxF "$p" /opt/shared/apt/extra-packages.txt 2>/dev/null || echo "$p" >> /opt/shared/apt/extra-packages.txt
+            ;;
+        esac
+      done
+    ' _ "${pkgs[@]}" || true
+    rm -f /var/cache/apt/archives/*.deb 2>/dev/null || true
+  fi
+  exit "$rc"
+fi
+
+exec "$REAL_BIN" "$@"

@@ -25,6 +25,16 @@ export const SANDBOX_DATA_BASE = path.join(__dirname, 'sandbox-data');
 // Seluruh ~/.gemini agy (token OAuth, conversations, history) di-share antar container
 // — perilaku sama dengan saat agy jalan langsung di host: 1 akun, history persisten.
 export const GEMINI_DATA_DIR = path.join(SANDBOX_DATA_BASE, 'gemini');
+// Folder paket & cache bersama lintas seluruh sandbox (/opt/shared):
+// install pip / npm -g / binary / deb cache di 1 obrolan -> semua obrolan otomatis kebagian.
+export const SHARED_PACKAGES_DIR = path.join(SANDBOX_DATA_BASE, 'shared');
+export const SANDBOX_SCHEMA_VERSION = '2';
+
+function ensureSharedDirs() {
+  for (const sub of ['.locks', 'bin', 'pyuser', 'npm', 'cache/pip', 'cache/npm', 'cache/uv', 'apt/deb-pool']) {
+    fs.mkdirSync(path.join(SHARED_PACKAGES_DIR, sub), { recursive: true });
+  }
+}
 
 const execFileP = (cmd, args, opts = {}) =>
   new Promise((resolve, reject) => {
@@ -63,8 +73,14 @@ export function ensureSandboxImage() {
 async function buildImageIfNeeded() {
   const quiet = { stdio: ['pipe', 'pipe', 'pipe'] };
   try {
-    await execFileP('docker', ['image', 'inspect', SANDBOX_IMAGE], quiet);
-    return SANDBOX_IMAGE;
+    const { stdout } = await execFileP(
+      'docker',
+      ['image', 'inspect', '-f', '{{index .Config.Labels "antigpt.image.v"}}', SANDBOX_IMAGE],
+      quiet,
+    );
+    if (stdout.trim() === SANDBOX_SCHEMA_VERSION) return SANDBOX_IMAGE;
+    console.log(`[Sandbox Auto-Build] Image '${SANDBOX_IMAGE}' masih skema lama, mem-build ulang ke v${SANDBOX_SCHEMA_VERSION}...`);
+    throw new Error('upgrade-schema');
   } catch {
     console.log(`[Sandbox Auto-Build] Image '${SANDBOX_IMAGE}' belum ada, membangun dari Dockerfile.sandbox...`);
     const dockerfilePath = path.join(__dirname, 'Dockerfile.sandbox');
@@ -123,22 +139,55 @@ export function ensureSandbox(slug) {
   return sandboxPending.get(safe);
 }
 
+const syncedAptMtime = new Map(); // containerName -> mtimeMs terakhir sync-shared-apt
+
+async function syncExtraAptPackagesIfNeeded(containerName) {
+  const extraFile = path.join(SHARED_PACKAGES_DIR, 'apt', 'extra-packages.txt');
+  let st;
+  try { st = fs.statSync(extraFile); } catch { return; }
+  if (!st.size) return;
+  if (syncedAptMtime.get(containerName) === st.mtimeMs) return;
+  try {
+    await execFileP('docker', ['exec', containerName, '/usr/local/bin/sync-shared-apt'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 3 * 60 * 1000,
+    });
+    syncedAptMtime.set(containerName, st.mtimeMs);
+  } catch {}
+}
+
 async function ensureSandboxOnce(slug) {
   const safe = slugSafe(slug);
   const containerName = getSafeContainerName(safe);
   const hostWorkspace = getSessionWorkspace(safe);
   fs.mkdirSync(GEMINI_DATA_DIR, { recursive: true });
+  ensureSharedDirs();
 
   try {
-    const { stdout } = await execFileP('docker', ['inspect', '-f', '{{.State.Running}}', containerName], { stdio: ['pipe', 'pipe', 'pipe'] });
-    if (stdout.trim() === 'true') return containerName;
-    await execFileP('docker', ['start', containerName], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const { stdout } = await execFileP(
+      'docker',
+      ['inspect', '-f', '{{.State.Running}}\t{{index .Config.Labels "antigpt.sandbox.v"}}', containerName],
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    const [runningStr, schemaVer] = stdout.trim().split('\t');
+    if (schemaVer !== SANDBOX_SCHEMA_VERSION) {
+      // Migrasi mulus container skema lama ke skema v2 (/opt/shared + Golden Base Image)
+      console.log(`[Sandbox] Migrasi ${containerName} ke skema v${SANDBOX_SCHEMA_VERSION}...`);
+      await execFileP('docker', ['rm', '-f', containerName], { stdio: ['pipe', 'pipe', 'pipe'] });
+      throw new Error('recreate-v2');
+    }
+    if (runningStr !== 'true') {
+      await execFileP('docker', ['start', containerName], { stdio: ['pipe', 'pipe', 'pipe'] });
+    }
+    await syncExtraAptPackagesIfNeeded(containerName);
     return containerName;
   } catch {
     const image = await ensureSandboxImage();
+    syncedAptMtime.delete(containerName);
     await execFileP('docker', ['run', '-d',
       '--init',
       '--name', containerName,
+      '--label', `antigpt.sandbox.v=${SANDBOX_SCHEMA_VERSION}`,
       // tidak auto-restart: container di-start on-demand oleh ensureSandbox & di-stop reaper saat idle
       '--restart', 'no',
       '--memory', MEMORY,
@@ -146,10 +195,12 @@ async function ensureSandboxOnce(slug) {
       '--pids-limit', PIDS,
       '-v', `${hostWorkspace}:${SANDBOX_HOME}`,
       '-v', `${GEMINI_DATA_DIR}:/root/.gemini`,
+      '-v', `${SHARED_PACKAGES_DIR}:/opt/shared`,
       '-w', SANDBOX_HOME,
       image, 'tail', '-f', '/dev/null',
     ], { stdio: ['pipe', 'pipe', 'pipe'] });
     await ensureAntigravity(containerName);
+    await syncExtraAptPackagesIfNeeded(containerName);
     return containerName;
   }
 }

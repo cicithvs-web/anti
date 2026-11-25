@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -e
+
+LIST="/opt/shared/apt/extra-packages.txt"
+STAMP="/var/lib/antigpt-apt-sync.stamp"
+[ -s "$LIST" ] || exit 0
+if [ -f "$STAMP" ] && [ ! "$LIST" -nt "$STAMP" ]; then
+  exit 0
+fi
+
+missing=()
+while IFS= read -r pkg || [ -n "$pkg" ]; do
+  pkg="$(echo "$pkg" | tr -d '[:space:]')"
+  [ -n "$pkg" ] || continue
+  pkg_base="${pkg%%=*}"
+  pkg_base="${pkg_base%%:*}"
+  if ! dpkg -s "$pkg_base" >/dev/null 2>&1; then
+    missing+=("$pkg")
+  fi
+done < "$LIST"
+
+if [ "${#missing[@]}" -gt 0 ]; then
+  export DEBIAN_FRONTEND=noninteractive
+  if [ -z "$(find /var/lib/apt/lists -maxdepth 1 -type f 2>/dev/null)" ]; then
+    /usr/bin/apt-get update -qq || true
+  fi
+  /usr/local/sbin/apt-get install -y -qq --no-install-recommends "${missing[@]}" || true
+fi
+touch "$STAMP"

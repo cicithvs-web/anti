@@ -24,7 +24,6 @@ import {
 } from './services/ai';
 import { MODELS, DEFAULT_MODEL, DEFAULT_UPLOAD_LIMITS } from './data/models';
 
-const USER_NAME = 'Xixi';
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
   const t = setTimeout(resolve, ms);
   signal?.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
@@ -783,7 +782,7 @@ export default function App() {
               onOpenQuestion={() => setDismissedQuestionId(null)}
             />
           )
-        ) : <Welcome name={USER_NAME} />}
+        ) : <Welcome />}
       </main>
 
       <div className="input-wrap">

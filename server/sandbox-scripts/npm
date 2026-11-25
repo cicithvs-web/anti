@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -e
+
+is_global=0
+is_mutating=0
+for arg in "$@"; do
+  case "$arg" in
+    -g|--global|--location=global) is_global=1 ;;
+    i|install|add|uninstall|remove|rm|update|up) is_mutating=1 ;;
+  esac
+done
+
+if [ -d /opt/shared ] && [ "$is_global" = "1" ] && [ "$is_mutating" = "1" ]; then
+  mkdir -p /opt/shared/.locks /opt/shared/npm /opt/shared/cache/npm
+  exec flock -w 300 /opt/shared/.locks/npm.lock /usr/bin/npm "$@"
+fi
+
+exec /usr/bin/npm "$@"

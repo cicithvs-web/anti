@@ -1,4 +1,3 @@
-import RippleButton from './RippleButton.jsx';
 function greeting() {
   const h = new Date().getHours();
   if (h < 11) return 'Selamat pagi';
@@ -7,12 +6,12 @@ function greeting() {
   return 'Selamat malam';
 }
 
-export default function Welcome({ name }) {
+export default function Welcome() {
   return (
     <div className="welcome">
       <img className="welcome-logo" src="/logo.png" alt="AntiGPT" width="58" height="58" />
-      <h1>{greeting()}, {name}</h1>
-      <p>Mau nanya apa hari ini?</p>
+      <h1>{greeting()}!</h1>
+      <p>Mau bahas apa hari ini?</p>
     </div>
   );
 }
