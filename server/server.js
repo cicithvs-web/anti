@@ -15,6 +15,7 @@ const agySandbox = await import('./sandboxManager.js');
 const jobs = await import('./jobs.js');
 const { buildElicitationAnswer } = await import('./acpClient.js');
 const { summarizeSession, parseTranscriptMessages } = await import('./transcriptParser.js');
+const { scanLibrary } = await import('./libraryScanner.js');
 
 const app = express();
 app.set('trust proxy', true); // supaya req.secure / req.ip benar di belakang nginx / tunnel
@@ -336,7 +337,7 @@ function serveChatProjectFile(req, res, { imageOnly = false, mediaOnly = false, 
       res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
     }
 
-    const downloadName = path.basename(filePath);
+    const downloadName = path.basename(filePath).replace(/^\d{10,}-[a-zA-Z0-9]{6,12}-/, '') || path.basename(filePath);
     const send = download
       ? res.download(filePath, downloadName, (err) => {
           if (err && !res.headersSent) res.sendStatus(err.statusCode || 404);
@@ -1069,6 +1070,51 @@ app.post('/api/admin/chats/:chatId/sleep', requireAdmin, async (req, res) => {
   }
   const stopped = await agySandbox.stopSandbox(slug);
   res.json({ ok: true, slug, stopped });
+});
+
+// ---------- ARTEFAK (buatan AI) & DROPLY (kiriman User) ----------
+app.post('/api/library', (req, res) => {
+  const scope = req.body?.scope === 'droply' ? 'droply' : 'artifacts';
+  const allServer = !!req.body?.allServer;
+
+  let chatInputs = [];
+  if (allServer) {
+    if (!isAdmin(req)) {
+      return res.status(403).json({ ok: false, adminRequired: true, error: 'Butuh kunci admin.' });
+    }
+    try {
+      const entries = fs.readdirSync(agy.BASE, { withFileTypes: true });
+      for (const ent of entries) {
+        if (!ent.isDirectory() || ent.name.startsWith('.') || ent.name === 'default') continue;
+        const sessionDir = path.join(agy.BASE, ent.name);
+        const sum = summarizeSession(ent.name, sessionDir, BRAIN_DIR);
+        if (sum) chatInputs.push({ id: sum.id, title: sum.title, updatedAt: sum.updatedAt });
+      }
+    } catch (err) {
+      console.error('[library] gagal memindai daftar sesi admin:', err);
+    }
+  } else {
+    const rawList = Array.isArray(req.body?.chats) ? req.body.chats.slice(0, 500) : [];
+    chatInputs = rawList
+      .filter((c) => c && typeof c.id === 'string' && c.id.trim())
+      .map((c) => ({
+        id: c.id.trim(),
+        title: typeof c.title === 'string' ? c.title.slice(0, 120) : '',
+        updatedAt: Number(c.updatedAt) || 0,
+        refs: Array.isArray(c.refs) ? c.refs.slice(0, 400) : undefined,
+        links: Array.isArray(c.links) ? c.links.slice(0, 400) : undefined,
+      }));
+  }
+
+  const result = scanLibrary({
+    scope,
+    chats: chatInputs,
+    agy,
+    brainBaseDir: BRAIN_DIR,
+    resolveChatFile,
+  });
+
+  res.json({ ok: true, scope, ...result });
 });
 
 // ---------- UNDUH APK ANDROID ----------

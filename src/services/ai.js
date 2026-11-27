@@ -71,6 +71,8 @@ export const getAdminChat = (chatId) => jfetch(`/api/admin/chats/${encodeURIComp
 export const updateAdminChat = (chatId, patch) =>
   jfetch(`/api/admin/chats/${encodeURIComponent(chatId)}`, { method: 'PATCH', body: JSON.stringify(patch || {}) });
 export const sleepAdminChat = (chatId) => post(`/api/admin/chats/${encodeURIComponent(chatId)}/sleep`);
+export const getLibraryItems = ({ scope, chats, allServer = false }) =>
+  post('/api/library', { scope, chats, allServer });
 
 // ---------- daftar model (cache sessionStorage, 10 menit, per akun) ----------
 const MODELS_KEY = 'models_cache_v1';

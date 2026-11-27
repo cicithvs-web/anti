@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, MessageCircle, Settings, UserRound, RefreshCw, Loader, Shield } from 'lucide-react';
+import { Plus, MessageCircle, Settings, UserRound, RefreshCw, Loader, Shield, Layers, Inbox } from 'lucide-react';
 import { useLongPress } from '../hooks/useLongPress';
 import ChatContextMenu from './ChatContextMenu';
 import ChatActionDialog from './ChatActionDialog';
@@ -24,8 +24,8 @@ function DrawerItem({ chat, active, running, onSelect, onLongPress }) {
 }
 
 export default function Drawer({
-  open, chats, activeId, isAdmin = false, loadingIds, onRefresh, refreshing = false,
-  onClose, onSelect, onNewChat, onTogglePin, onRename, onDelete, onSleepSandbox, onStopChat,
+  open, chats, activeId, activeSection = 'chat', isAdmin = false, loadingIds, onRefresh, refreshing = false,
+  onClose, onSelect, onOpenSection, onNewChat, onTogglePin, onRename, onDelete, onSleepSandbox, onStopChat,
   onOpenSettings, onOpenAccount, loggedIn,
 }) {
   const [menu, setMenu] = useState(null);
@@ -53,7 +53,7 @@ export default function Drawer({
     <DrawerItem
       key={c.id}
       chat={c}
-      active={c.id === activeId}
+      active={activeSection === 'chat' && c.id === activeId}
       running={running}
       onSelect={onSelect}
       onLongPress={(chat, y) => setMenu({ chat, y })}
@@ -84,6 +84,24 @@ export default function Drawer({
             </div>
           )}
         </div>
+        {onOpenSection && (
+          <div className="drawer-nav">
+            <RippleButton
+              className={'drawer-nav-item' + (activeSection === 'artifacts' ? ' active' : '')}
+              onClick={() => onOpenSection('artifacts')}
+            >
+              <span className="drawer-nav-ico"><Layers size={19} strokeWidth={1.85} /></span>
+              <span className="drawer-nav-label">Artefak</span>
+            </RippleButton>
+            <RippleButton
+              className={'drawer-nav-item' + (activeSection === 'droply' ? ' active' : '')}
+              onClick={() => onOpenSection('droply')}
+            >
+              <span className="drawer-nav-ico"><Inbox size={19} strokeWidth={1.85} /></span>
+              <span className="drawer-nav-label">Droply</span>
+            </RippleButton>
+          </div>
+        )}
         <hr className="divider" />
         <div className="drawer-list">
           {isAdmin && runningList.length > 0 && (

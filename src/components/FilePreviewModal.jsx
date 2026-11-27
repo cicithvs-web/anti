@@ -358,6 +358,17 @@ export default function FilePreviewModal({ file, onClose }) {
 
   useEffect(() => {
     if (!open) return;
+    const onBack = (e) => {
+      e.preventDefault();
+      if (menuOpen) setMenuOpen(false);
+      else onClose();
+    };
+    window.addEventListener('antigpt:back', onBack);
+    return () => window.removeEventListener('antigpt:back', onBack);
+  }, [open, menuOpen, onClose]);
+
+  useEffect(() => {
+    if (!open) return;
     const onKey = (e) => {
       if (e.key === 'Escape') {
         if (menuOpen) setMenuOpen(false);

@@ -14,6 +14,7 @@ import AccountSheet from './components/AccountSheet';
 import AuthGate from './components/AuthGate';
 import ImageEditor from './components/ImageEditor';
 import ImageLightbox from './components/ImageLightbox';
+import LibraryView from './components/LibraryView';
 import { isEditableImage } from './services/imageEdit';
 import { installNativeImeBridge } from './utils/nativeIme';
 import { useChats, newId } from './hooks/useChats';
@@ -33,6 +34,8 @@ export default function App() {
   const { chats, createChat, addMessage, updateLastMessage, updateLastUserMessage, togglePin, renameChat, setChatModel, deleteChat } = useChats();
   const [authed, setAuthed] = useState(null); // null = cek, false = minta token, true = boleh
   const [activeId, setActiveId] = useState(null);
+  const [activeSection, setActiveSection] = useState('chat'); // 'chat' | 'artifacts' | 'droply'
+  const [libRefreshTick, setLibRefreshTick] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sheet, setSheet] = useState(null); // 'attach' | 'model' | null
   // model default untuk chat BARU (= model terakhir yang dipilih)
@@ -169,7 +172,7 @@ export default function App() {
 
   // Handler tombol Back Android (dipanggil oleh APK native sebelum keluar)
   const uiLayersRef = useRef({});
-  uiLayersRef.current = { editing, preview, questionOpen, activeQuestionId: activeQuestion?.id || null, settingsOpen, accountOpen, sheet, drawerOpen };
+  uiLayersRef.current = { editing, preview, questionOpen, activeQuestionId: activeQuestion?.id || null, settingsOpen, accountOpen, sheet, drawerOpen, activeSection };
   useEffect(() => {
     window.__antigptHandleBack = () => {
       const ev = new CustomEvent('antigpt:back', { cancelable: true });
@@ -183,6 +186,7 @@ export default function App() {
       if (s.accountOpen) { setAccountOpen(false); return true; }
       if (s.sheet) { setSheet(null); return true; }
       if (s.drawerOpen) { setDrawerOpen(false); return true; }
+      if (s.activeSection !== 'chat') { setActiveSection('chat'); return true; }
       return false;
     };
     return () => { delete window.__antigptHandleBack; };
@@ -348,7 +352,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  const newChat = () => { setActiveId(null); setDrawerOpen(false); };
+  const newChat = () => { setActiveSection('chat'); setActiveId(null); setDrawerOpen(false); };
 
   // Ikuti job chat di server sampai `done`. Koneksi putus → sambung ulang otomatis (replay dari seq terakhir).
   // open(signal, onEvent) = request pertama (POST mulai job, atau GET resume).
@@ -528,6 +532,7 @@ export default function App() {
 
   // Pilih obrolan di Drawer (di mode admin: muat riwayat dari VPS & sambung live jika sedang berjalan)
   const selectChat = (id) => {
+    setActiveSection('chat');
     setActiveId(id);
     setDrawerOpen(false);
     if (isAdminViewRef.current) loadAdminChat(id);
@@ -536,6 +541,7 @@ export default function App() {
   // Saat user mengetuk notifikasi Android → buka langsung chat yang dimaksud & sambung/muat jawabannya
   const openChatFromNotification = useCallback((chatId) => {
     if (!chatId) return;
+    setActiveSection('chat');
     setDrawerOpen(false);
     setSettingsOpen(false);
     setAccountOpen(false);
@@ -760,15 +766,32 @@ export default function App() {
   if (authed === null) return <div className="app" />;
   if (authed === false) return <AuthGate onSuccess={() => setAuthed(true)} />;
 
+  const headerTitle = activeSection === 'artifacts'
+    ? 'Artefak'
+    : activeSection === 'droply'
+      ? 'Droply'
+      : (active?.title ?? 'AntiGPT');
+
   return (
     <div className="app">
       <Header
-        title={active?.title ?? 'AntiGPT'}
-        onMenu={() => setDrawerOpen(true)} onNewChat={newChat}
+        title={headerTitle}
+        onMenu={() => setDrawerOpen(true)}
+        onNewChat={newChat}
+        onBack={activeSection !== 'chat' ? () => setActiveSection('chat') : undefined}
+        onRefresh={activeSection !== 'chat' ? () => setLibRefreshTick(t => t + 1) : undefined}
       />
 
       <main className="content">
-        {active ? (
+        {activeSection !== 'chat' ? (
+          <LibraryView
+            scope={activeSection}
+            chats={visibleChats}
+            isAdminView={isAdminView}
+            refreshTick={libRefreshTick}
+            onOpenChat={(cid) => selectChat(cid)}
+          />
+        ) : active ? (
           isAdminView && loadingChatId === active.id && !(active.messages?.length) ? (
             <div className="chat-loading-state">
               <Loader size={18} className="spin" />
@@ -785,38 +808,42 @@ export default function App() {
         ) : <Welcome />}
       </main>
 
-      <div className="input-wrap">
-        {activeQuestion && !questionOpen && (
-          <button
-            type="button"
-            className="question-banner"
-            onClick={() => setDismissedQuestionId(null)}
-          >
-            <MessageCircleQuestion size={18} />
-            <span className="question-banner-text">
-              <strong>AI menunggu jawabanmu</strong>
-              <small>{activeQuestion.fields?.[0]?.title || activeQuestion.message || 'Ketuk untuk menjawab'}</small>
-            </span>
-            <span className="question-banner-cta">Jawab</span>
-          </button>
-        )}
-        <ChatInput
-          isNewChat={!active}
-          modelName={modelName} attachments={attachments}
-          attachError={attachError} onClearAttachError={() => setAttachError('')}
-          onRemoveAttachment={(i) => { setAttachments(a => a.filter((_, j) => j !== i)); setAttachError(''); }}
-          onPreviewAttachment={(i) => setPreview(attachments[i])}
-          onSend={handleSend} onStop={() => stopChat(activeId)} disabled={loading}
-          onOpenAttach={() => setSheet('attach')} onOpenModel={() => setSheet('model')}
-        />
-      </div>
+      {activeSection === 'chat' && (
+        <div className="input-wrap">
+          {activeQuestion && !questionOpen && (
+            <button
+              type="button"
+              className="question-banner"
+              onClick={() => setDismissedQuestionId(null)}
+            >
+              <MessageCircleQuestion size={18} />
+              <span className="question-banner-text">
+                <strong>AI menunggu jawabanmu</strong>
+                <small>{activeQuestion.fields?.[0]?.title || activeQuestion.message || 'Ketuk untuk menjawab'}</small>
+              </span>
+              <span className="question-banner-cta">Jawab</span>
+            </button>
+          )}
+          <ChatInput
+            isNewChat={!active}
+            modelName={modelName} attachments={attachments}
+            attachError={attachError} onClearAttachError={() => setAttachError('')}
+            onRemoveAttachment={(i) => { setAttachments(a => a.filter((_, j) => j !== i)); setAttachError(''); }}
+            onPreviewAttachment={(i) => setPreview(attachments[i])}
+            onSend={handleSend} onStop={() => stopChat(activeId)} disabled={loading}
+            onOpenAttach={() => setSheet('attach')} onOpenModel={() => setSheet('model')}
+          />
+        </div>
+      )}
 
       <Drawer
         open={drawerOpen} chats={visibleChats} activeId={activeId}
+        activeSection={activeSection}
         isAdmin={isAdminView} loadingIds={loadingIds}
         onRefresh={() => refreshAdminChats()} refreshing={adminRefreshing}
         onClose={() => setDrawerOpen(false)}
         onSelect={selectChat}
+        onOpenSection={(sec) => { setActiveSection(sec); setDrawerOpen(false); }}
         onNewChat={newChat} onTogglePin={handleTogglePin} onRename={handleRename}
         onDelete={handleDelete}
         onSleepSandbox={handleSleepSandbox}
